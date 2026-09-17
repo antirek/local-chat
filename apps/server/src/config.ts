@@ -10,7 +10,11 @@ export const config = {
   chat3: {
     grpcUrl: process.env.CHAT3_GRPC_URL || '127.0.0.1:50051',
     apiKey: process.env.CHAT3_API_KEY || '',
-    tenantId: process.env.CHAT3_TENANT_ID || 'tnt_localchat'
+    tenantId: process.env.CHAT3_TENANT_ID || 'tnt_localchat',
+    /** per_user = SubscribeUpdates per scope; multiplex = WatchUpdates bidi */
+    watchMode: (process.env.CHAT3_WATCH_MODE || 'multiplex').toLowerCase() as
+      | 'per_user'
+      | 'multiplex'
   },
   protoPath:
     process.env.CHAT3_PROTO_PATH ||

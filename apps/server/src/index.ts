@@ -8,15 +8,24 @@ import { Chat3Client } from './chat3Client.js';
 import { createApiRouter } from './api.js';
 import { verifyToken } from './auth.js';
 import { UpdatesWatchGateway, type WatchScope } from './updatesWatchGateway.js';
+import { MultiplexWatchClient } from './multiplexWatchClient.js';
+import { createMultiplexOpenStream } from './multiplexOpenStream.js';
 
 async function main() {
   await mongoose.connect(config.mongoUri);
   console.log('[local-chat] mongo connected', config.mongoUri);
 
   const chat3 = new Chat3Client();
-  console.log('[local-chat] chat3 grpc', config.chat3.grpcUrl, 'tenant', config.chat3.tenantId);
+  console.log(
+    '[local-chat] chat3 grpc',
+    config.chat3.grpcUrl,
+    'tenant',
+    config.chat3.tenantId,
+    'watchMode',
+    config.chat3.watchMode
+  );
 
-  const gateway = new UpdatesWatchGateway((scope: WatchScope) => {
+  const openPerScope = (scope: WatchScope) => {
     if (scope.kind === 'user') {
       return chat3.subscribeUpdates(scope.userId);
     }
@@ -24,7 +33,17 @@ async function main() {
       return chat3.subscribeTenantUpdates(scope.tenantIds);
     }
     return chat3.subscribeTenantUpdates([]);
-  });
+  };
+
+  let gateway: UpdatesWatchGateway;
+  if (config.chat3.watchMode === 'multiplex') {
+    const multiplex = new MultiplexWatchClient({
+      openCall: () => chat3.watchUpdates()
+    });
+    gateway = new UpdatesWatchGateway(createMultiplexOpenStream(multiplex, openPerScope));
+  } else {
+    gateway = new UpdatesWatchGateway(openPerScope);
+  }
 
   const app = express();
   app.use(cors());

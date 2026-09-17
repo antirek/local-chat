@@ -200,4 +200,11 @@ export class Chat3Client {
     meta.add('x-api-key', config.chat3.apiKey);
     return this.client.SubscribeTenantUpdates({ tenant_ids: tenantIds }, meta);
   }
+
+  /** Bidi WatchUpdates — metadata api-key only. */
+  watchUpdates(): grpc.ClientDuplexStream<any, any> {
+    const meta = new grpc.Metadata();
+    meta.add('x-api-key', config.chat3.apiKey);
+    return this.client.WatchUpdates(meta);
+  }
 }

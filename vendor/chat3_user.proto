@@ -40,6 +40,14 @@ service Chat3UserService {
   // Auth: только x-api-key (x-tenant-id не задаёт scope этого stream).
   rpc SubscribeTenantUpdates(SubscribeTenantUpdatesRequest) returns (stream Update);
 
+  // Bidirectional multiplexed watch: один stream, динамический набор
+  // personal binds (watch/unwatch → AMQP bind/unbind на одной queue).
+  // Auth: только x-api-key. tenant_id — в каждом WatchUsers.
+  // Idle (пустой active set) не закрывает stream.
+  // Лимиты (server): max ~500 watched keys; max ~100 user_ids на сообщение;
+  // batch при превышении лимита отклоняется атомарно.
+  rpc WatchUpdates(stream WatchUpdatesClientMsg) returns (stream Update);
+
   // Выставить статус сообщения для user_id (например read / delivered).
   rpc SetMessageStatus(SetMessageStatusRequest) returns (SetMessageStatusResponse);
 
@@ -157,7 +165,24 @@ message SubscribeTenantUpdatesRequest {
   repeated string tenant_ids = 1;
 }
 
-// Персональное update-событие из потока SubscribeUpdates / SubscribeTenantUpdates.
+// Клиентские команды для WatchUpdates (bidi).
+message WatchUpdatesClientMsg {
+  oneof op {
+    WatchUsers watch = 1;
+    WatchUsers unwatch = 2;
+  }
+}
+
+message WatchUsers {
+  // Tenant scope для всех user_ids в этом batch.
+  string tenant_id = 1;
+  // Список userId; сервер дедуплицирует. Непустой.
+  repeated string user_ids = 2;
+  // Опционально; default "user" для всего batch.
+  string user_type = 3;
+}
+
+// Персональное update-событие из потока SubscribeUpdates / SubscribeTenantUpdates / WatchUpdates.
 message Update {
   string update_id = 1;
   string tenant_id = 2;
