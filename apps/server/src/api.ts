@@ -31,12 +31,20 @@ function fromStruct(value: any): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function mapDialog(d: any) {
+function mapDialog(d: any, extras?: { member?: any; stats?: any }) {
+  const member = extras?.member || d.member;
+  const memberState = member?.state || {};
+  const unreadFromMember = memberState.unread_count ?? memberState.unreadCount;
+  const stats = extras?.stats || d.stats || {};
   return {
     dialogId: d.dialog_id,
     meta: fromStruct(d.meta),
     createdAt: d.created_at,
     memberUserIds: d.member_user_ids || [],
+    membersCount:
+      d.members_count ??
+      stats.member_count ??
+      (Array.isArray(d.member_user_ids) ? d.member_user_ids.length : 0),
     lastMessage: d.last_message
       ? {
           messageId: d.last_message.message_id,
@@ -46,7 +54,12 @@ function mapDialog(d: any) {
           type: d.last_message.type
         }
       : null,
-    unreadCount: d.member?.state?.unread_count || 0
+    unreadCount: unreadFromMember ?? 0,
+    stats: {
+      memberCount: stats.member_count ?? 0,
+      messageCount: stats.message_count ?? 0,
+      topicCount: stats.topic_count ?? 0
+    }
   };
 }
 
@@ -231,7 +244,12 @@ export function createApiRouter(chat3: Chat3Client): Router {
   router.get('/dialogs/:dialogId', authMiddleware, async (req: AuthedRequest, res) => {
     try {
       const result = await chat3.getDialog(req.user!.login, req.params.dialogId);
-      res.json({ dialog: mapDialog(result.dialog) });
+      res.json({
+        dialog: mapDialog(result.dialog, {
+          member: result.member,
+          stats: result.stats
+        })
+      });
     } catch (error: any) {
       console.error('get-dialog', error);
       const code = String(error?.code || '');
@@ -245,18 +263,23 @@ export function createApiRouter(chat3: Chat3Client): Router {
 
   router.get('/dialogs/:dialogId/members', authMiddleware, async (req: AuthedRequest, res) => {
     try {
-      // membership gate via GetDialog
-      await chat3.getDialog(req.user!.login, req.params.dialogId);
-      const result = await chat3.listDialogMembers(req.params.dialogId);
+      const result = await chat3.listDialogMembers(req.params.dialogId, 1, 100, req.user!.login);
       const memberUserIds: string[] = result.member_user_ids || [];
       const users = await LocalUser.find({ login: { $in: memberUserIds } })
         .select('login name')
         .lean();
       const byLogin = new Map(users.map((u) => [u.login, u.name]));
+      const joinedByLogin = new Map(
+        (result.members || []).map((m: any) => [
+          m.user_id,
+          m.state?.joined_at ?? 0
+        ])
+      );
       res.json({
         members: memberUserIds.map((login) => ({
           login,
-          name: byLogin.get(login) || login
+          name: byLogin.get(login) || login,
+          joinedAt: joinedByLogin.get(login) || 0
         })),
         total: result.total || memberUserIds.length
       });

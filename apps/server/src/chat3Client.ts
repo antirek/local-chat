@@ -158,11 +158,12 @@ export class Chat3Client {
     });
   }
 
-  listDialogMembers(dialogId: string, page = 1, limit = 100) {
+  listDialogMembers(dialogId: string, page = 1, limit = 100, userId?: string) {
     return this.unary('ListDialogMembers', {
       dialog_id: dialogId,
       page,
-      limit
+      limit,
+      user_id: userId || ''
     });
   }
 

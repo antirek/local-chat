@@ -211,6 +211,10 @@ message Dialog {
   DialogMember member = 8;
   // Последнее сообщение, если include_last_message=true.
   Message last_message = 9;
+  // Число участников (удобно для UI без отдельного ListDialogMembers).
+  int32 members_count = 10;
+  // Компактные stats dialog (member/message/topic counts).
+  DialogStatsLite stats = 11;
 }
 
 message DialogMember {
@@ -224,6 +228,15 @@ message MemberState {
   double last_seen_at = 2;
   double last_message_at = 3;
   bool is_active = 4;
+  // Когда user стал member (мс/мкс timestamp Chat3).
+  double joined_at = 5;
+}
+
+// Компактные счётчики dialog (как REST stats без Controlo-полей).
+message DialogStatsLite {
+  int32 member_count = 1;
+  int32 message_count = 2;
+  int32 topic_count = 3;
 }
 
 message Message {
@@ -451,12 +464,17 @@ message GetDialogRequest {
 
 message GetDialogResponse {
   DialogInfo dialog = 1;
+  // Заполняется, если в запросе был user_id (membership gate + unread/activity).
+  DialogMember member = 2;
+  DialogStatsLite stats = 3;
 }
 
 message ListDialogMembersRequest {
   string dialog_id = 1;
   int32 page = 2;
   int32 limit = 3;
+  // Опционально: если задан — только member может листить roster.
+  string user_id = 4;
 }
 
 message ListDialogMembersResponse {
@@ -465,6 +483,8 @@ message ListDialogMembersResponse {
   int32 limit = 3;
   int32 total = 4;
   int32 total_pages = 5;
+  // Обогащённый roster (joined_at в state); параллельно member_user_ids для совместимости.
+  repeated DialogMember members = 6;
 }
 
 message UpdateDialogMetaRequest {
