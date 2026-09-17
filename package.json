@@ -1,0 +1,17 @@
+{
+  "name": "local-chat",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @local-chat/server",
+    "dev:web": "npm run dev -w @local-chat/web",
+    "build": "npm run build -w @local-chat/server && npm run build -w @local-chat/web",
+    "start:server": "npm run start -w @local-chat/server"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}

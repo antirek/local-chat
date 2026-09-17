@@ -1,0 +1,455 @@
+syntax = "proto3";
+
+package chat3.user;
+
+import "google/protobuf/struct.proto";
+
+// Chat3UserService — интеграторский User gRPC API.
+//
+// Auth (gRPC metadata):
+//   - x-api-key: секрет интегратора (единственный credential)
+//
+// Tenant scope (не часть auth):
+//   - x-tenant-id: в каком tenant выполнять RPC (данные изолированы по tenant).
+//     Валидный ключ может работать с любым существующим tenant (allowlist нет).
+//
+// Контекст пользователя — поле user_id в теле RPC (не JWT).
+// Meta на сущностях — opaque google.protobuf.Struct (продуктовые конвенции
+// вроде type/dmKey живут у интегратора, не в Chat3).
+service Chat3UserService {
+  // Список диалогов пользователя.
+  // Поддерживает page/limit, filter/sort (как в Tenant REST) и опционально last_message.
+  rpc GetUserDialogs(GetUserDialogsRequest) returns (GetUserDialogsResponse);
+
+  // История сообщений диалога с пагинацией.
+  // user_id должен быть участником dialog (иначе ошибка доступа).
+  rpc GetDialogMessages(GetDialogMessagesRequest) returns (GetDialogMessagesResponse);
+
+  // Отправить сообщение в dialog.
+  // type по умолчанию для текста: internal.text; content — тело сообщения.
+  // Членство в dialog для SendMessage не требуется (поведение Chat3).
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // Server-streaming подписка на персональные updates пользователя
+  // (новые сообщения, статусы, typing и т.д. через chat3_updates).
+  // Scope: один (tenant из x-tenant-id, user_id).
+  rpc SubscribeUpdates(SubscribeUpdatesRequest) returns (stream Update);
+
+  // Server-streaming firehose Updates по tenant(ам) или всем tenant.
+  // tenant_ids пустой → wildcard (все tenant). Иначе — bind per tenant.
+  // Auth: только x-api-key (x-tenant-id не задаёт scope этого stream).
+  rpc SubscribeTenantUpdates(SubscribeTenantUpdatesRequest) returns (stream Update);
+
+  // Выставить статус сообщения для user_id (например read / delivered).
+  rpc SetMessageStatus(SetMessageStatusRequest) returns (SetMessageStatusResponse);
+
+  // Поставить или снять реакцию на сообщение (set=true/false).
+  rpc SetMessageReaction(SetMessageReactionRequest) returns (SetMessageReactionResponse);
+
+  // Короткий индикатор «печатает» в dialog. Требует членства в dialog.
+  rpc SendTypingIndicator(SendTypingIndicatorRequest) returns (SendTypingIndicatorResponse);
+
+  // Soft-delete / restore сообщения (deleted=true/false).
+  rpc SetMessageDeleted(SetMessageDeletedRequest) returns (SetMessageDeletedResponse);
+
+  // Пометить весь dialog прочитанным для user_id (сброс unread).
+  rpc MarkDialogAllRead(MarkDialogAllReadRequest) returns (MarkDialogAllReadResponse);
+
+  // --- Provisioning ---
+
+  // Создать пользователя или обновить существующего по user_id.
+  // name записывается в meta.name; дополнительные ключи — в meta.
+  rpc UpsertUser(UpsertUserRequest) returns (UpsertUserResponse);
+
+  // Получить пользователя тенанта по user_id (профиль + meta).
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+
+  // Создать dialog: actor (user_id) всегда становится member;
+  // member_user_ids — дополнительные участники; meta — произвольные ключи.
+  rpc CreateDialog(CreateDialogRequest) returns (CreateDialogResponse);
+
+  // Найти dialog по одному meta key/value (tenant-scoped).
+  // Если передан user_id — возвращает результат только при членстве этого user.
+  // Типичный паттерн 1:1 у интегратора: meta_key=dmKey, meta_value=a:b.
+  rpc FindDialogByMeta(FindDialogByMetaRequest) returns (FindDialogByMetaResponse);
+
+  // Добавить участников в существующий dialog.
+  // Дедуп: уже состоящие в dialog не возвращаются в added_user_ids.
+  rpc AddDialogMembers(AddDialogMembersRequest) returns (AddDialogMembersResponse);
+
+  // Удалить участника из dialog. Нельзя удалить последнего member.
+  rpc RemoveDialogMember(RemoveDialogMemberRequest) returns (RemoveDialogMemberResponse);
+
+  // Получить dialog по id (+ meta, member_user_ids).
+  // Если передан user_id — только при членстве этого user.
+  rpc GetDialog(GetDialogRequest) returns (GetDialogResponse);
+
+  // Список участников dialog (user_id), с пагинацией.
+  rpc ListDialogMembers(ListDialogMembersRequest) returns (ListDialogMembersResponse);
+
+  // Merge meta dialog (opaque keys). Типично: смена title группы.
+  // Эмитит dialog.changed.
+  rpc UpdateDialogMeta(UpdateDialogMetaRequest) returns (UpdateDialogMetaResponse);
+}
+
+message GetUserDialogsRequest {
+  // Пользователь, чьи dialogs вернуть.
+  string user_id = 1;
+  // Номер страницы (с 1).
+  int32 page = 2;
+  // Размер страницы.
+  int32 limit = 3;
+  // Filter expression (синтаксис как у Tenant API list dialogs).
+  string filter = 4;
+  // Sort, обычно JSON, напр. {"updatedAt":-1}.
+  string sort = 5;
+  // Если true — в каждый Dialog включить last_message.
+  bool include_last_message = 6;
+}
+
+message GetUserDialogsResponse {
+  repeated Dialog dialogs = 1;
+  Pagination pagination = 2;
+}
+
+message GetDialogMessagesRequest {
+  // Запрашивающий пользователь (проверка членства).
+  string user_id = 1;
+  // Целевой dialog.
+  string dialog_id = 2;
+  int32 page = 3;
+  int32 limit = 4;
+  string filter = 5;
+  // Sort, напр. {"createdAt":1} для хронологии.
+  string sort = 6;
+}
+
+message GetDialogMessagesResponse {
+  repeated Message messages = 1;
+  Pagination pagination = 2;
+}
+
+message SendMessageRequest {
+  // Отправитель (actor).
+  string user_id = 1;
+  string dialog_id = 2;
+  // Текст / payload сообщения.
+  string content = 3;
+  // Тип сообщения, напр. internal.text.
+  string type = 4;
+  // Произвольная meta сообщения.
+  google.protobuf.Struct meta = 5;
+  // Ключ идемпотентности (повтор с тем же ключом не создаст дубликат).
+  string idempotency_key = 6;
+}
+
+message SendMessageResponse {
+  Message message = 1;
+}
+
+message SubscribeUpdatesRequest {
+  // Пользователь, на чьи updates подписаться.
+  string user_id = 1;
+}
+
+message SubscribeTenantUpdatesRequest {
+  // Список tenant для firehose. Пустой = все tenant (wildcard bind).
+  repeated string tenant_ids = 1;
+}
+
+// Персональное update-событие из потока SubscribeUpdates / SubscribeTenantUpdates.
+message Update {
+  string update_id = 1;
+  string tenant_id = 2;
+  string user_id = 3;
+  string entity_id = 4;
+  string event_id = 5;
+  // Исходный domain event, напр. message.create.
+  string source_event_type = 6;
+  string update_type = 7;
+  // Полезная нагрузка update (структура зависит от update_type).
+  google.protobuf.Struct data = 8;
+  // Unix time (мс, double как в Chat3).
+  double created_at = 9;
+}
+
+message Dialog {
+  string dialog_id = 1;
+  string tenant_id = 2;
+  string name = 3;
+  string created_by = 4;
+  double created_at = 5;
+  double updated_at = 6;
+  // Opaque meta dialog (type, title, dmKey, … — на стороне интегратора).
+  google.protobuf.Struct meta = 7;
+  // Контекст членства запрашивающего user_id (unread и т.п.).
+  DialogMember member = 8;
+  // Последнее сообщение, если include_last_message=true.
+  Message last_message = 9;
+}
+
+message DialogMember {
+  string user_id = 1;
+  google.protobuf.Struct meta = 2;
+  MemberState state = 3;
+}
+
+message MemberState {
+  int32 unread_count = 1;
+  double last_seen_at = 2;
+  double last_message_at = 3;
+  bool is_active = 4;
+}
+
+message Message {
+  string message_id = 1;
+  string dialog_id = 2;
+  string sender_id = 3;
+  // Тип, напр. internal.text.
+  string type = 4;
+  string content = 5;
+  google.protobuf.Struct meta = 6;
+  repeated MessageStatus statuses = 7;
+  google.protobuf.Struct reaction_set = 8;
+  SenderInfo sender_info = 9;
+  double created_at = 10;
+  string topic_id = 11;
+  google.protobuf.Struct topic = 12;
+  // Soft-delete flag.
+  bool deleted = 13;
+  double deleted_at = 14;
+  string deleted_by = 15;
+  google.protobuf.Struct status_message_matrix = 16;
+  bool edited = 17;
+  double edited_at = 18;
+  string edited_by = 19;
+}
+
+message MessageStatus {
+  string user_id = 1;
+  // Значение статуса, напр. read / delivered.
+  string status = 2;
+  double read_at = 3;
+  double created_at = 4;
+}
+
+message SenderInfo {
+  string user_id = 1;
+  string name = 2;
+  double created_at = 3;
+  google.protobuf.Struct meta = 4;
+}
+
+message Pagination {
+  int32 page = 1;
+  int32 limit = 2;
+  int32 total = 3;
+  int32 pages = 4;
+}
+
+message SetMessageStatusRequest {
+  string user_id = 1;
+  string dialog_id = 2;
+  string message_id = 3;
+  // Новый статус для user_id, напр. read.
+  string status = 4;
+}
+
+message SetMessageStatusResponse {
+  MessageStatus status = 1;
+  Message message = 2;
+}
+
+message SetMessageReactionRequest {
+  string user_id = 1;
+  string dialog_id = 2;
+  string message_id = 3;
+  // Код/emoji реакции.
+  string reaction = 4;
+  // true — поставить, false — снять.
+  bool set = 5;
+}
+
+message SetMessageReactionResponse {
+  string message = 1;
+  google.protobuf.Struct reaction_set = 2;
+}
+
+message SendTypingIndicatorRequest {
+  // Кто печатает (должен быть member dialog).
+  string user_id = 1;
+  string dialog_id = 2;
+}
+
+message SendTypingIndicatorResponse {
+  string message = 1;
+  string dialog_id = 2;
+  string user_id = 3;
+  // Через сколько мс индикатор истечёт на клиентах.
+  int32 expires_in_ms = 4;
+}
+
+message SetMessageDeletedRequest {
+  string user_id = 1;
+  string message_id = 2;
+  // true — пометить удалённым, false — восстановить.
+  bool deleted = 3;
+  // Кто удалил (обычно = user_id).
+  string deleted_by = 4;
+}
+
+message SetMessageDeletedResponse {
+  Message message = 1;
+}
+
+message MarkDialogAllReadRequest {
+  string user_id = 1;
+  string dialog_id = 2;
+}
+
+message MarkDialogAllReadResponse {
+  string message = 1;
+  string dialog_id = 2;
+  string user_id = 3;
+}
+
+message User {
+  // Стабильный id пользователя в тенанте (часто login).
+  string user_id = 1;
+  string tenant_id = 2;
+  // Тип сущности user, обычно "user".
+  string type = 3;
+  double created_at = 4;
+  // Профильная meta (name и произвольные ключи).
+  google.protobuf.Struct meta = 5;
+}
+
+// Компактное представление dialog после create / find / members.
+message DialogInfo {
+  string dialog_id = 1;
+  string tenant_id = 2;
+  double created_at = 3;
+  // Opaque meta dialog.
+  google.protobuf.Struct meta = 4;
+  // Текущий список member user_id.
+  repeated string member_user_ids = 5;
+}
+
+message UpsertUserRequest {
+  // Id пользователя (будет нормализован: trim + lowercase).
+  string user_id = 1;
+  // Отображаемое имя → meta.name.
+  string name = 2;
+  // Тип, по умолчанию user.
+  string type = 3;
+  // Дополнительная meta (мержится с name).
+  google.protobuf.Struct meta = 4;
+}
+
+message UpsertUserResponse {
+  User user = 1;
+  // true если пользователь только что создан.
+  bool created = 2;
+}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message CreateDialogRequest {
+  // Actor create; всегда добавляется в members.
+  string user_id = 1;
+  // Дополнительные участники (без дублей, без обязательности существования в Chat3
+  // — обычно интегратор делает UpsertUser заранее).
+  repeated string member_user_ids = 2;
+  // Произвольная meta. Примеры интегратора: {type:group,title:...} или {type:dm,dmKey:...}.
+  google.protobuf.Struct meta = 3;
+}
+
+message CreateDialogResponse {
+  DialogInfo dialog = 1;
+  // Для create всегда true (идемпотентность 1:1 делает интегратор через FindDialogByMeta).
+  bool created = 2;
+}
+
+message FindDialogByMetaRequest {
+  // Опционально: если задан — dialog вернётся только если user member.
+  string user_id = 1;
+  // Ключ meta, напр. dmKey.
+  string meta_key = 2;
+  // Точное значение meta, напр. alice:bob.
+  string meta_value = 3;
+}
+
+message FindDialogByMetaResponse {
+  // false — dialog с таким meta не найден (или нет членства).
+  bool found = 1;
+  // Заполняется только если found=true.
+  DialogInfo dialog = 2;
+}
+
+message AddDialogMembersRequest {
+  // Actor операции.
+  string user_id = 1;
+  string dialog_id = 2;
+  // Кого добавить.
+  repeated string member_user_ids = 3;
+}
+
+message AddDialogMembersResponse {
+  DialogInfo dialog = 1;
+  // Фактически добавленные (без уже состоявших в dialog).
+  repeated string added_user_ids = 2;
+}
+
+message RemoveDialogMemberRequest {
+  // Actor операции.
+  string user_id = 1;
+  string dialog_id = 2;
+  // Кого удалить.
+  string member_user_id = 3;
+}
+
+message RemoveDialogMemberResponse {
+  DialogInfo dialog = 1;
+}
+
+message GetDialogRequest {
+  string dialog_id = 1;
+  // Опционально: если задан — dialog вернётся только если user member.
+  string user_id = 2;
+}
+
+message GetDialogResponse {
+  DialogInfo dialog = 1;
+}
+
+message ListDialogMembersRequest {
+  string dialog_id = 1;
+  int32 page = 2;
+  int32 limit = 3;
+}
+
+message ListDialogMembersResponse {
+  repeated string member_user_ids = 1;
+  int32 page = 2;
+  int32 limit = 3;
+  int32 total = 4;
+  int32 total_pages = 5;
+}
+
+message UpdateDialogMetaRequest {
+  // Actor операции (для event).
+  string user_id = 1;
+  string dialog_id = 2;
+  // Ключи мержатся в существующую meta (replace per-key, не wipe всего объекта).
+  google.protobuf.Struct meta = 3;
+}
+
+message UpdateDialogMetaResponse {
+  DialogInfo dialog = 1;
+}
