@@ -180,6 +180,12 @@ export function createApiRouter(chat3: Chat3Client): Router {
       const result = await chat3.getDialogMessages(req.user!.login, req.params.dialogId);
       const messages = (result.messages || []).map((m: any) => {
         const senderMeta = fromStruct(m.sender_info?.meta);
+        const statuses = (m.statuses || []).map((s: any) => ({
+          userId: s.user_id,
+          status: s.status,
+          createdAt: s.created_at,
+          readAt: s.read_at
+        }));
         return {
           messageId: m.message_id,
           dialogId: m.dialog_id,
@@ -188,7 +194,8 @@ export function createApiRouter(chat3: Chat3Client): Router {
           type: m.type,
           createdAt: m.created_at,
           deleted: m.deleted === true,
-          senderName: (senderMeta.name as string) || m.sender_info?.name || m.sender_id
+          senderName: (senderMeta.name as string) || m.sender_info?.name || m.sender_id,
+          statuses
         };
       });
       res.json({ messages });
@@ -353,7 +360,13 @@ export function createApiRouter(chat3: Chat3Client): Router {
           senderId: m.sender_id,
           content: m.content,
           type: m.type,
-          createdAt: m.created_at
+          createdAt: m.created_at,
+          statuses: (m.statuses || []).map((s: any) => ({
+            userId: s.user_id,
+            status: s.status,
+            createdAt: s.created_at,
+            readAt: s.read_at
+          }))
         }
       });
     } catch (error: any) {

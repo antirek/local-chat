@@ -65,7 +65,7 @@ const chatListItems = computed(() => {
       lastMessage: d.lastMessage?.content || '',
       'lastActivity.timestamp': ts,
       'lastActivity.time': formatClock(ts),
-      status: '#10b981',
+      // Don't fake online presence — Chat3 has no presence signal yet.
       isSelected: d.dialogId === selectedId.value
     };
   });
@@ -91,7 +91,9 @@ const feedObjects = computed(() => {
         messageId: m.messageId,
         text: m.content,
         timestamp,
-        status: 'read',
+        // Outgoing: map Chat3 peer statuses; never hardcode "read".
+        // Incoming: no delivery ticks for the viewer.
+        status: incoming ? undefined : chottoOutgoingStatus(m, user.value?.login),
         direction: incoming ? 'incoming' : 'outgoing',
         // header/avatar only for incoming — closer to Slack / BasicChat polish
         header: incoming ? senderLabel : undefined,
@@ -108,6 +110,23 @@ const feedObjects = computed(() => {
   }));
   return insertDaySeparators(withPosition as any);
 });
+
+/** Map Chat3 MessageStatus rows → Chotto tick: sent | received | read */
+function chottoOutgoingStatus(
+  message: { statuses?: Array<{ userId?: string; status?: string }> },
+  me?: string
+): 'sent' | 'received' | 'read' {
+  const peers = (message.statuses || []).filter((s) => s.userId && s.userId !== me);
+  const ranks: Record<string, number> = { unread: 0, sent: 0, delivered: 1, received: 1, read: 2 };
+  let best = 0;
+  for (const s of peers) {
+    const key = String(s.status || '').toLowerCase();
+    best = Math.max(best, ranks[key] ?? 0);
+  }
+  if (best >= 2) return 'read';
+  if (best >= 1) return 'received';
+  return 'sent';
+}
 
 async function submitAuth() {
   error.value = '';
@@ -397,7 +416,7 @@ watch(selectedId, () => {
                     </div>
                   </div>
                 </template>
-                <ChatInfo v-if="selectedChat" :chat="selectedChat" description="в сети" />
+                <ChatInfo v-if="selectedChat" :chat="selectedChat" />
                 <div
                   v-if="selectedChat && dialogs.find((d) => d.dialogId === selectedId)?.meta?.type === 'group'"
                   class="group-bar"
