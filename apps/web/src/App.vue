@@ -25,6 +25,7 @@ import {
 } from './api';
 import { chat3Timestamp, formatClock, initialsAvatar, toUnixSeconds } from './avatars';
 import { useViewportReadReceipts } from './useViewportReadReceipts';
+import { applyChat3Update, type TypingState } from './applyChat3Update';
 
 const user = ref<User | null>(getUser());
 const token = ref<string | null>(getToken());
@@ -44,6 +45,11 @@ const peerLogin = ref('');
 const groupTitle = ref('');
 const groupMembers = ref('');
 const scrollFeedToBottom = ref(false);
+/** Global unread from UserStatsUpdate (toolbar badge). */
+const totalUnreadCount = ref(0);
+/** Peer typing in the open dialog (from TypingUpdate). */
+const typingState = ref<TypingState | null>(null);
+let typingClearTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Dialog list pagination via GetUserDialogs (gRPC page/limit). */
 const DIALOGS_PAGE_SIZE = 30;
@@ -235,6 +241,8 @@ function logout() {
   messages.value = [];
   selectedId.value = null;
   dialogListFilter.value = 'all';
+  totalUnreadCount.value = 0;
+  setTypingFromUpdate(null);
   dialogsPage.value = 0;
   dialogsHasMore.value = true;
   messagesPage.value = 0;
@@ -572,74 +580,64 @@ async function createGroup() {
   }
 }
 
+function setTypingFromUpdate(next: TypingState | null) {
+  if (typingClearTimer) {
+    clearTimeout(typingClearTimer);
+    typingClearTimer = null;
+  }
+  typingState.value = next;
+  if (!next) return;
+  const ms = Math.max(500, next.expiresAt - Date.now());
+  typingClearTimer = setTimeout(() => {
+    if (typingState.value?.userId === next.userId) typingState.value = null;
+    typingClearTimer = null;
+  }, ms);
+}
+
+function onChat3Update(payload: any) {
+  if (payload.type !== 'chat3.update') return;
+  const update = payload.update || {};
+  const result = applyChat3Update(update, {
+    myLogin: user.value?.login,
+    selectedId: selectedId.value,
+    dialogs: dialogs.value,
+    messages: messages.value,
+    dialogListFilter: dialogListFilter.value,
+    totalUnreadCount: totalUnreadCount.value,
+    typing: typingState.value
+  });
+
+  if (result.dialogs) dialogs.value = result.dialogs;
+  if (result.messages) {
+    const grew =
+      result.messages.length > messages.value.length ||
+      result.messages[result.messages.length - 1]?.messageId !==
+        messages.value[messages.value.length - 1]?.messageId;
+    messages.value = result.messages;
+    if (grew && feedNearBottom()) bumpScroll();
+  }
+  if (typeof result.totalUnreadCount === 'number') {
+    totalUnreadCount.value = result.totalUnreadCount;
+  }
+  if (result.typing !== undefined) setTypingFromUpdate(result.typing);
+  if (result.selectedMovedUp) {
+    void nextTick(() => scrollChatListToSelected());
+  }
+  if (result.needsDialogRefresh) {
+    scheduleRefreshDialogs(700);
+  }
+}
+
 async function bootChat() {
   await reloadDialogs();
+  // Seed toolbar badge from current page (UserStatsUpdate will refine).
+  totalUnreadCount.value = dialogs.value.reduce(
+    (sum, d) => sum + (Number(d.unreadCount) || 0),
+    0
+  );
   requestAnimationFrame(() => bindChatListPrefetch());
   ws?.close();
-  let msgHeadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  ws = connectUpdates(async (payload) => {
-    if (payload.type !== 'chat3.update') return;
-    const update = payload.update || {};
-    const source =
-      String(update.source_event_type || update.sourceEventType || '');
-    const updateType = String(update.update_type || update.updateType || '');
-
-    // Typing / connection noise — ignore entirely.
-    if (source === 'dialog.typing' || updateType === 'TypingUpdate') return;
-    if (
-      source === 'connection.established' ||
-      source === 'watch.ack' ||
-      source === 'unwatch.ack'
-    ) {
-      return;
-    }
-
-    // DialogMemberUpdate / dialog.* → list only (debounced).
-    // MessageUpdate → list + optional messages head merge.
-    const isMessageUpdate =
-      source.startsWith('message.') ||
-      updateType === 'MessageUpdate' ||
-      updateType === 'update.message';
-    // message.status.update is for ticks — refresh list unread is enough; skip messages GET.
-    const needsMessageHead =
-      isMessageUpdate &&
-      source !== 'message.status.update' &&
-      source !== 'message.reaction.update';
-
-    scheduleRefreshDialogs(isMessageUpdate ? 400 : 700);
-    if (!needsMessageHead) return;
-    if (!selectedId.value || selectedId.value === 'undefined') return;
-
-    const updateDialogId =
-      update.data?.dialog?.dialogId ||
-      update.data?.dialog?.dialog_id ||
-      update.data?.message?.dialogId ||
-      update.data?.message?.dialog_id ||
-      null;
-    if (updateDialogId && updateDialogId !== selectedId.value) return;
-
-    if (msgHeadRefreshTimer) clearTimeout(msgHeadRefreshTimer);
-    msgHeadRefreshTimer = setTimeout(async () => {
-      const dialogId = selectedId.value;
-      if (!dialogId || messagesLoading.value || !feedNearBottom()) return;
-      try {
-        const data = await api.messages(dialogId, {
-          page: 1,
-          limit: MESSAGES_PAGE_SIZE
-        });
-        if (selectedId.value !== dialogId) return;
-        const newest = chronoMessages(data.messages || []);
-        const seen = new Set(messages.value.map((m) => m.messageId));
-        const added = newest.filter((m) => m.messageId && !seen.has(m.messageId));
-        if (added.length) {
-          messages.value = [...messages.value, ...added];
-          bumpScroll();
-        }
-      } catch (e) {
-        console.warn('refresh messages failed', e);
-      }
-    }, 400);
-  });
+  ws = connectUpdates(onChat3Update);
 }
 
 onMounted(async () => {
@@ -724,6 +722,7 @@ async function removeGroupMember(login: string) {
 watch(selectedId, () => {
   error.value = '';
   groupPanel.value = false;
+  setTypingFromUpdate(null);
   void loadGroupPanel();
 });
 </script>
@@ -758,6 +757,9 @@ watch(selectedId, () => {
         <strong>Local Chat</strong>
       </div>
       <div class="spacer" />
+      <span v-if="totalUnreadCount > 0" class="unread-badge" title="Непрочитанные">
+        {{ totalUnreadCount > 99 ? '99+' : totalUnreadCount }}
+      </span>
       <span class="user">{{ user.name }} (@{{ user.login }})</span>
       <button class="ghost" type="button" @click="logout">Выйти</button>
     </div>
@@ -816,6 +818,13 @@ watch(selectedId, () => {
                   </div>
                 </template>
                 <ChatInfo v-if="selectedChat" :chat="selectedChat" />
+                <div
+                  v-if="typingState && typingState.dialogId === selectedId"
+                  class="typing-bar"
+                  aria-live="polite"
+                >
+                  {{ typingState.name }} печатает…
+                </div>
                 <div
                   v-if="selectedChat && dialogs.find((d) => d.dialogId === selectedId)?.meta?.type === 'group'"
                   class="group-bar"
@@ -898,6 +907,13 @@ watch(selectedId, () => {
 </template>
 
 <style scoped>
+.typing-bar {
+  padding: 4px 16px;
+  font-size: 12px;
+  color: #64748b;
+  border-bottom: 1px solid #eef2f7;
+  flex-shrink: 0;
+}
 .group-bar {
   padding: 6px 14px;
   border-bottom: 1px solid #e5e7eb;

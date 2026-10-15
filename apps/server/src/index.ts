@@ -10,6 +10,7 @@ import { verifyToken } from './auth.js';
 import { UpdatesWatchGateway, type WatchScope } from './updatesWatchGateway.js';
 import { MultiplexWatchClient } from './multiplexWatchClient.js';
 import { createMultiplexOpenStream } from './multiplexOpenStream.js';
+import { normalizeGrpcUpdate } from './structCodec.js';
 
 async function main() {
   await mongoose.connect(config.mongoUri);
@@ -72,7 +73,10 @@ async function main() {
 
       const unwatch = gateway.watch(scope, (update: any) => {
         if (socket.readyState === socket.OPEN) {
-          socket.send(JSON.stringify({ type: 'chat3.update', update }));
+          // Decode protobuf Struct `data` so the browser can patch UI without refetch.
+          socket.send(
+            JSON.stringify({ type: 'chat3.update', update: normalizeGrpcUpdate(update) })
+          );
         }
       });
 
