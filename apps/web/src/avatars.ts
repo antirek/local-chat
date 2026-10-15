@@ -30,10 +30,27 @@ export function initialsAvatar(seed: string, label?: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
-export function toUnixSeconds(value: unknown): number {
+/**
+ * Chat3/MMS3 timestamps: unix **milliseconds** with up to 6 fractional digits
+ * (microseconds), e.g. `1730891234567.123456`. Do not Math.floor — that kills
+ * sort stability between events in the same ms.
+ *
+ * Missing/invalid → 0 (never invent Date.now()).
+ * Values that look like seconds (< 1e12) are scaled to ms.
+ */
+export function chat3Timestamp(value: unknown): number {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return Math.floor(Date.now() / 1000);
-  return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 1e12 ? n * 1000 : n;
+}
+
+/**
+ * Unix seconds with fractional part (Chat3 µs preserved as fraction).
+ * Suitable for Chotto Feed (`formatTimestamp` expects seconds * 1000 → Date).
+ */
+export function toUnixSeconds(value: unknown): number {
+  const ms = chat3Timestamp(value);
+  return ms ? ms / 1000 : 0;
 }
 
 export function formatClock(tsSec: number): string {

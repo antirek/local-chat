@@ -23,7 +23,7 @@ import {
   setSession,
   type User
 } from './api';
-import { formatClock, initialsAvatar, toUnixSeconds } from './avatars';
+import { chat3Timestamp, formatClock, initialsAvatar, toUnixSeconds } from './avatars';
 import { useViewportReadReceipts } from './useViewportReadReceipts';
 
 const user = ref<User | null>(getUser());
@@ -52,7 +52,16 @@ const readReceipts = useViewportReadReceipts({
   selectedId,
   messages,
   myLogin,
-  onMarked: () => refreshDialogs()
+  onMarked: async () => {
+    // Drop badge immediately so the chat leaves the unread block without waiting
+    // for counter-worker / dialogs refetch (which also used to reshuffle the list).
+    const id = selectedId.value;
+    if (id) {
+      const row = dialogs.value.find((d) => d.dialogId === id);
+      if (row) row.unreadCount = 0;
+    }
+    await refreshDialogs();
+  }
 });
 
 function onVisibilityChange() {
@@ -60,7 +69,9 @@ function onVisibilityChange() {
 }
 
 const chatListItems = computed(() => {
-  const items = dialogs.value.map((d) => {
+  // Order comes from Chat3 GetUserDialogs (default: lastInteractionAt desc).
+  // Timestamps are ms with microsecond fraction — preserve full Number, no re-sort.
+  return dialogs.value.map((d) => {
     const meta = d.meta || {};
     const isDm = meta.type === 'dm';
     const title = isDm
@@ -69,22 +80,21 @@ const chatListItems = computed(() => {
           .filter((x: string) => x && x !== user.value?.login)
           .join('') || 'DM'
       : meta.title || 'Группа';
-    const ts = toUnixSeconds(d.lastMessage?.createdAt || d.createdAt || Date.now());
+    // Pass through Chat3 ms.ffffff — list order is server-side; Chotto may compare nested dialogs.
+    const activity = chat3Timestamp(d.lastMessage?.createdAt || d.createdAt || 0);
+    const clockSec = activity ? Math.floor(activity / 1000) : 0;
     return {
       chatId: d.dialogId,
       name: title,
       avatar: initialsAvatar(String(d.dialogId || title), title),
       countUnread: d.unreadCount || 0,
       lastMessage: d.lastMessage?.content || '',
-      'lastActivity.timestamp': ts,
-      'lastActivity.time': formatClock(ts),
+      'lastActivity.timestamp': activity,
+      'lastActivity.time': clockSec ? formatClock(clockSec) : '',
       // Don't fake online presence — Chat3 has no presence signal yet.
       isSelected: d.dialogId === selectedId.value
     };
   });
-  return items.sort(
-    (a, b) => Number(b['lastActivity.timestamp']) - Number(a['lastActivity.timestamp'])
-  );
 });
 
 const selectedChat = computed(
@@ -96,6 +106,7 @@ const feedObjects = computed(() => {
   const mapped = messages.value
     .filter((m) => !m.deleted)
     .map((m) => {
+      // Seconds + fraction (Chat3 µs) — Chotto formatTimestamp expects seconds.
       const timestamp = toUnixSeconds(m.createdAt);
       const incoming = m.senderId !== user.value?.login;
       const senderLabel = m.senderName || m.senderId;
