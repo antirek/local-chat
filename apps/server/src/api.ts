@@ -204,7 +204,15 @@ export function createApiRouter(chat3: Chat3Client): Router {
 
   router.get('/dialogs/:dialogId/messages', authMiddleware, async (req: AuthedRequest, res) => {
     try {
-      const result = await chat3.getDialogMessages(req.user!.login, req.params.dialogId);
+      const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+      const limit = Math.min(
+        100,
+        Math.max(1, parseInt(String(req.query.limit || '30'), 10) || 30)
+      );
+      const result = await chat3.getDialogMessages(req.user!.login, req.params.dialogId, {
+        page,
+        limit
+      });
       const messages = (result.messages || []).map((m: any) => {
         const senderMeta = fromStruct(m.sender_info?.meta);
         const statuses = (m.statuses || []).map((s: any) => ({
@@ -225,7 +233,16 @@ export function createApiRouter(chat3: Chat3Client): Router {
           statuses
         };
       });
-      res.json({ messages });
+      const p = result.pagination || {};
+      res.json({
+        messages,
+        pagination: {
+          page: p.page || page,
+          limit: p.limit || limit,
+          total: p.total ?? messages.length,
+          pages: p.pages ?? 1
+        }
+      });
     } catch (error: any) {
       console.error('messages', error);
       res.status(500).json({ error: error?.details || error?.message || 'failed' });

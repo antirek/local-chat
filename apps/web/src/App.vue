@@ -53,23 +53,34 @@ const dialogsPage = ref(0);
 const dialogsHasMore = ref(true);
 const dialogsLoading = ref(false);
 
+/** Message feed pagination via GetDialogMessages (newest page first, older on scroll-up). */
+const MESSAGES_PAGE_SIZE = 30;
+/** Prefetch older messages when this many px from the top (Chotto default ~300). */
+const MESSAGES_PREFETCH_TOP_PX = 800;
+const messagesPage = ref(0);
+const messagesHasMore = ref(true);
+const messagesLoading = ref(false);
+/** Block Chotto's initial @load-more (fires before scroll-to-bottom). */
+const allowMessagePrefetch = ref(false);
+
 let ws: WebSocket | null = null;
 let chatListEl: HTMLElement | null = null;
+let feedEl: HTMLElement | null = null;
+let dialogsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 const myLogin = computed(() => user.value?.login);
 const readReceipts = useViewportReadReceipts({
   selectedId,
   messages,
   myLogin,
-  onMarked: async () => {
-    // Drop badge immediately so the chat leaves the unread block without waiting
-    // for counter-worker / dialogs refetch (which also used to reshuffle the list).
+  onMarked: () => {
+    // Optimistic only — full list refresh is debounced via WS DialogMemberUpdate.
+    // Awaiting refreshDialogs here doubled GET /dialogs on every mark-read.
     const id = selectedId.value;
     if (id) {
       const row = dialogs.value.find((d) => d.dialogId === id);
       if (row) row.unreadCount = 0;
     }
-    await refreshDialogs();
   }
 });
 
@@ -193,9 +204,19 @@ function logout() {
   selectedId.value = null;
   dialogsPage.value = 0;
   dialogsHasMore.value = true;
+  messagesPage.value = 0;
+  messagesHasMore.value = true;
   if (chatListEl) {
     chatListEl.removeEventListener('scroll', onChatListScroll);
     chatListEl = null;
+  }
+  if (feedEl) {
+    feedEl.removeEventListener('scroll', onFeedScroll);
+    feedEl = null;
+  }
+  if (dialogsRefreshTimer) {
+    clearTimeout(dialogsRefreshTimer);
+    dialogsRefreshTimer = null;
   }
   ws?.close();
   ws = null;
@@ -227,6 +248,15 @@ async function refreshDialogs() {
   } catch (e) {
     console.warn('refreshDialogs failed', e);
   }
+}
+
+/** Coalesce bursty WS updates (mark-read / counter) into one GET /dialogs. */
+function scheduleRefreshDialogs(delayMs = 700) {
+  if (dialogsRefreshTimer) clearTimeout(dialogsRefreshTimer);
+  dialogsRefreshTimer = setTimeout(() => {
+    dialogsRefreshTimer = null;
+    void refreshDialogs();
+  }, delayMs);
 }
 
 function chatListScrollBottom(): number {
@@ -290,6 +320,86 @@ function bindChatListPrefetch() {
   chatListEl.addEventListener('scroll', onChatListScroll, { passive: true });
 }
 
+/** API returns newest-first; Feed wants chronological (oldest → newest). */
+function chronoMessages(batch: any[]): any[] {
+  return [...batch].reverse();
+}
+
+async function loadMessagesPage(reset: boolean) {
+  const dialogId = selectedId.value;
+  if (!dialogId || messagesLoading.value) return;
+  if (!reset && !messagesHasMore.value) return;
+  messagesLoading.value = true;
+  try {
+    const page = reset ? 1 : messagesPage.value + 1;
+    const data = await api.messages(dialogId, { page, limit: MESSAGES_PAGE_SIZE });
+    // Guard: user may have switched dialogs while request was in flight.
+    if (selectedId.value !== dialogId) return;
+    const batch = chronoMessages(data.messages || []);
+    const pag = data.pagination || {};
+    if (reset) {
+      messages.value = batch;
+    } else {
+      const seen = new Set(messages.value.map((m) => m.messageId));
+      messages.value = [
+        ...batch.filter((m) => m.messageId && !seen.has(m.messageId)),
+        ...messages.value
+      ];
+    }
+    messagesPage.value = pag.page || page;
+    const pages = pag.pages ?? 1;
+    messagesHasMore.value = messagesPage.value < pages && batch.length > 0;
+  } catch (e) {
+    console.warn('loadMessagesPage failed', e);
+  } finally {
+    messagesLoading.value = false;
+  }
+  // Keep prefetching older history while still near the top.
+  if (!reset && messagesHasMore.value && !messagesLoading.value) {
+    requestAnimationFrame(() => {
+      if (feedScrollTop() < MESSAGES_PREFETCH_TOP_PX) void loadMessagesPage(false);
+    });
+  }
+}
+
+function feedScrollTop(): number {
+  const el = feedEl || document.querySelector<HTMLElement>('.message-feed');
+  return el?.scrollTop ?? Number.POSITIVE_INFINITY;
+}
+
+/** True when the user is reading the live end of the feed (not older history). */
+function feedNearBottom(thresholdPx = 240): boolean {
+  const el = feedEl || document.querySelector<HTMLElement>('.message-feed');
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < thresholdPx;
+}
+
+function onFeedScroll() {
+  if (!allowMessagePrefetch.value) return;
+  if (
+    messagesHasMore.value &&
+    !messagesLoading.value &&
+    feedScrollTop() < MESSAGES_PREFETCH_TOP_PX
+  ) {
+    void loadMessagesPage(false);
+  }
+}
+
+function bindFeedPrefetch() {
+  const el = document.querySelector<HTMLElement>('.message-feed');
+  if (!el || el === feedEl) return;
+  if (feedEl) feedEl.removeEventListener('scroll', onFeedScroll);
+  feedEl = el;
+  feedEl.addEventListener('scroll', onFeedScroll, { passive: true });
+}
+
+async function onLoadMoreMessages() {
+  // Chotto Feed @load-more when near top (~300px).
+  if (!allowMessagePrefetch.value) return;
+  if (!messagesHasMore.value || messagesLoading.value) return;
+  await loadMessagesPage(false);
+}
+
 async function openDialog(dialogId: string) {
   if (!dialogId || dialogId === 'undefined' || dialogId === 'null') {
     console.warn('openDialog: skip invalid dialogId', dialogId);
@@ -297,9 +407,19 @@ async function openDialog(dialogId: string) {
   }
   selectedId.value = dialogId;
   readReceipts.resetForDialog(dialogId);
-  const data = await api.messages(dialogId);
-  messages.value = data.messages || [];
+  allowMessagePrefetch.value = false;
+  messagesPage.value = 0;
+  messagesHasMore.value = true;
+  messages.value = [];
+  await loadMessagesPage(true);
   bumpScroll();
+  requestAnimationFrame(() => {
+    bindFeedPrefetch();
+    // After pin-to-bottom, allow history prefetch on real upward scroll.
+    setTimeout(() => {
+      allowMessagePrefetch.value = true;
+    }, 350);
+  });
   // Read markers are sent when Feed reports visible incoming messages
   // (@message-visible / IntersectionObserver), not eagerly on select.
 }
@@ -380,18 +500,69 @@ async function bootChat() {
   await reloadDialogs();
   requestAnimationFrame(() => bindChatListPrefetch());
   ws?.close();
+  let msgHeadRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   ws = connectUpdates(async (payload) => {
     if (payload.type !== 'chat3.update') return;
-    await refreshDialogs();
-    if (selectedId.value && selectedId.value !== 'undefined') {
+    const update = payload.update || {};
+    const source =
+      String(update.source_event_type || update.sourceEventType || '');
+    const updateType = String(update.update_type || update.updateType || '');
+
+    // Typing / connection noise — ignore entirely.
+    if (source === 'dialog.typing' || updateType === 'TypingUpdate') return;
+    if (
+      source === 'connection.established' ||
+      source === 'watch.ack' ||
+      source === 'unwatch.ack'
+    ) {
+      return;
+    }
+
+    // DialogMemberUpdate / dialog.* → list only (debounced).
+    // MessageUpdate → list + optional messages head merge.
+    const isMessageUpdate =
+      source.startsWith('message.') ||
+      updateType === 'MessageUpdate' ||
+      updateType === 'update.message';
+    // message.status.update is for ticks — refresh list unread is enough; skip messages GET.
+    const needsMessageHead =
+      isMessageUpdate &&
+      source !== 'message.status.update' &&
+      source !== 'message.reaction.update';
+
+    scheduleRefreshDialogs(isMessageUpdate ? 400 : 700);
+    if (!needsMessageHead) return;
+    if (!selectedId.value || selectedId.value === 'undefined') return;
+
+    const updateDialogId =
+      update.data?.dialog?.dialogId ||
+      update.data?.dialog?.dialog_id ||
+      update.data?.message?.dialogId ||
+      update.data?.message?.dialog_id ||
+      null;
+    if (updateDialogId && updateDialogId !== selectedId.value) return;
+
+    if (msgHeadRefreshTimer) clearTimeout(msgHeadRefreshTimer);
+    msgHeadRefreshTimer = setTimeout(async () => {
+      const dialogId = selectedId.value;
+      if (!dialogId || messagesLoading.value || !feedNearBottom()) return;
       try {
-        const data = await api.messages(selectedId.value);
-        messages.value = data.messages || [];
-        bumpScroll();
+        const data = await api.messages(dialogId, {
+          page: 1,
+          limit: MESSAGES_PAGE_SIZE
+        });
+        if (selectedId.value !== dialogId) return;
+        const newest = chronoMessages(data.messages || []);
+        const seen = new Set(messages.value.map((m) => m.messageId));
+        const added = newest.filter((m) => m.messageId && !seen.has(m.messageId));
+        if (added.length) {
+          messages.value = [...messages.value, ...added];
+          bumpScroll();
+        }
       } catch (e) {
         console.warn('refresh messages failed', e);
       }
-    }
+    }, 400);
   });
 }
 
@@ -411,6 +582,10 @@ onUnmounted(() => {
   if (chatListEl) {
     chatListEl.removeEventListener('scroll', onChatListScroll);
     chatListEl = null;
+  }
+  if (feedEl) {
+    feedEl.removeEventListener('scroll', onFeedScroll);
+    feedEl = null;
   }
   ws?.close();
 });
@@ -592,6 +767,7 @@ watch(selectedId, () => {
                     :scroll-to-bottom="scrollFeedToBottom"
                     :reactions-enabled="false"
                     @message-visible="readReceipts.onMessageVisible"
+                    @load-more="onLoadMoreMessages"
                   />
                 </div>
                 <ChatInput v-if="selectedChat" @send="onSend" @typing="onTyping">

@@ -32,12 +32,15 @@ export function useViewportReadReceipts(options: {
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let flushing = false;
   let markedDialogId: string | null = null;
+  /** Avoid re-calling MarkDialogAllRead — each call emits dialog.member.changed → WS spam. */
+  let dialogMarkedAllRead = false;
 
   function resetForDialog(dialogId: string | null) {
     if (markedDialogId === dialogId) return;
     markedDialogId = dialogId;
     marked.clear();
     visibleUntil = 0;
+    dialogMarkedAllRead = false;
     if (flushTimer) {
       clearTimeout(flushTimer);
       flushTimer = null;
@@ -77,12 +80,17 @@ export function useViewportReadReceipts(options: {
     const unreadIncoming = all.filter(
       (m) => m.senderId !== me && !marked.has(m.messageId) && (Number(m.createdAt) || 0) <= visibleUntil
     );
+
+    // At bottom with nothing new to mark — do not re-hit MarkDialogAllRead.
+    if (visibleUntil >= latestAt && dialogMarkedAllRead && !unreadIncoming.length) return;
     if (!unreadIncoming.length && visibleUntil < latestAt) return;
+    if (!unreadIncoming.length && dialogMarkedAllRead) return;
 
     flushing = true;
     try {
       if (visibleUntil >= latestAt) {
         await api.markRead(dialogId);
+        dialogMarkedAllRead = true;
         for (const m of all) {
           if (m.senderId !== me) marked.add(m.messageId);
         }

@@ -75,13 +75,21 @@ export class Chat3Client {
     });
   }
 
-  getDialogMessages(userId: string, dialogId: string) {
+  getDialogMessages(
+    userId: string,
+    dialogId: string,
+    opts: { page?: number; limit?: number; sort?: string } = {}
+  ) {
+    const page = opts.page && opts.page > 0 ? opts.page : 1;
+    const limit = opts.limit && opts.limit > 0 ? opts.limit : 30;
+    // Newest first — page 1 = latest window; higher pages = older history.
+    const sort = opts.sort || '(createdAt,desc)';
     return this.unary('GetDialogMessages', {
       user_id: userId,
       dialog_id: dialogId,
-      page: 1,
-      limit: 100,
-      sort: '{"createdAt":1}'
+      page,
+      limit,
+      sort
     });
   }
 
