@@ -38,11 +38,16 @@ async function register(page, user, mode = 'register') {
   await page.waitForSelector('.chat-shell', { timeout: 20000 });
 }
 
+async function pickUser(page, peerLogin) {
+  await page.locator('[data-testid="user-search"]').fill(peerLogin);
+  await page.locator(`[data-testid="user-option"][data-login="${peerLogin}"]`).click();
+}
+
 async function openDm(page, peerLogin) {
   await page.getByRole('button', { name: 'DM' }).click();
-  await page.waitForSelector('.modal');
-  await page.locator('.modal input').fill(peerLogin);
-  await page.locator('.modal').getByRole('button', { name: 'Открыть' }).click();
+  await page.waitForSelector('[data-testid="dm-modal"]');
+  await pickUser(page, peerLogin);
+  await page.locator('[data-testid="dm-modal"]').getByRole('button', { name: 'Открыть' }).click();
   await page.waitForSelector('[data-testid="feed"], .lc-feed', { timeout: 15000 });
 }
 
@@ -141,10 +146,10 @@ async function main() {
 
   console.log('8) Create group from Alice');
   await alicePage.getByRole('button', { name: 'Группа' }).click();
-  await alicePage.waitForSelector('.modal');
-  await alicePage.locator('.modal input').nth(0).fill(`Team ${stamp}`);
-  await alicePage.locator('.modal input').nth(1).fill(bob.login);
-  await alicePage.locator('.modal').getByRole('button', { name: 'Создать' }).click();
+  await alicePage.waitForSelector('[data-testid="group-modal"]');
+  await alicePage.locator('[data-testid="group-title"]').fill(`Team ${stamp}`);
+  await pickUser(alicePage, bob.login);
+  await alicePage.locator('[data-testid="group-modal"]').getByRole('button', { name: 'Создать' }).click();
   await alicePage.waitForTimeout(2000);
   const groupMsg = `group hi ${stamp}`;
   await sendMessage(alicePage, groupMsg);

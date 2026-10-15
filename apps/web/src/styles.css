@@ -294,7 +294,16 @@ html, body, #app {
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.2);
 }
 
-.modal h3 { margin: 0 0 12px; }
+.modal.modal-wide {
+  width: min(480px, calc(100% - 32px));
+}
+
+.modal h3 { margin: 0 0 8px; }
+.modal-hint {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--lc-muted, #64748b);
+}
 .modal input {
   width: 100%;
   margin-bottom: 12px;
@@ -304,3 +313,7 @@ html, body, #app {
 }
 .modal .actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal .ghost { background: #e2e8f0; color: #0f172a; }
+.modal button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

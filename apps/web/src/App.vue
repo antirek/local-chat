@@ -26,6 +26,7 @@ import {
 import { chat3Timestamp, formatClock, initialsAvatar, toUnixSeconds } from './avatars';
 import { useViewportReadReceipts } from './useViewportReadReceipts';
 import { applyChat3Update, type TypingState } from './applyChat3Update';
+import UserPicker from './UserPicker.vue';
 
 const user = ref<User | null>(getUser());
 const token = ref<string | null>(getToken());
@@ -41,9 +42,12 @@ const selectedId = ref<string | null>(null);
 const messages = ref<any[]>([]);
 const showDm = ref(false);
 const showGroup = ref(false);
-const peerLogin = ref('');
+/** Selected peer login for new DM (0–1). */
+const dmSelected = ref<string[]>([]);
 const groupTitle = ref('');
-const groupMembers = ref('');
+/** Selected member logins for new group. */
+const groupSelected = ref<string[]>([]);
+const creatingChat = ref(false);
 const scrollFeedToBottom = ref(false);
 /** Global unread from UserStatsUpdate (toolbar badge). */
 const totalUnreadCount = ref(0);
@@ -555,34 +559,72 @@ async function onSend(payload: any) {
   // List order / lastMessage come from WatchUpdates — no GET /dialogs here.
 }
 
+function openDmModal() {
+  error.value = '';
+  dmSelected.value = [];
+  showDm.value = true;
+}
+
+function openGroupModal() {
+  error.value = '';
+  groupTitle.value = '';
+  groupSelected.value = [];
+  showGroup.value = true;
+}
+
+function closeDmModal() {
+  showDm.value = false;
+  dmSelected.value = [];
+}
+
+function closeGroupModal() {
+  showGroup.value = false;
+  groupTitle.value = '';
+  groupSelected.value = [];
+}
+
 async function createDm() {
   error.value = '';
+  const peer = (dmSelected.value[0] || '').trim().toLowerCase();
+  if (!peer) {
+    error.value = 'Выберите собеседника из списка';
+    return;
+  }
+  creatingChat.value = true;
   try {
-    const data = await api.dm(peerLogin.value.trim().toLowerCase());
-    showDm.value = false;
-    peerLogin.value = '';
-  await reloadDialogs();
-  await openDialog(data.dialog.dialogId);
+    const data = await api.dm(peer);
+    closeDmModal();
+    await reloadDialogs();
+    await openDialog(data.dialog.dialogId);
   } catch (e: any) {
     error.value = e.message;
+  } finally {
+    creatingChat.value = false;
   }
 }
 
 async function createGroup() {
   error.value = '';
+  const title = groupTitle.value.trim();
+  const members = groupSelected.value.map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (!title) {
+    error.value = 'Укажите название группы';
+    return;
+  }
+  if (!members.length) {
+    error.value = 'Выберите хотя бы одного участника';
+    return;
+  }
+  creatingChat.value = true;
   try {
-    const members = groupMembers.value
-      .split(',')
-      .map((x) => x.trim().toLowerCase())
-      .filter(Boolean);
-    const data = await api.group(groupTitle.value.trim(), members);
-    showGroup.value = false;
-    groupTitle.value = '';
-    groupMembers.value = '';
+    const data = await api.group(title, members);
+    closeGroupModal();
     await reloadDialogs();
     await openDialog(data.dialog.dialogId);
   } catch (e: any) {
     error.value = e.message;
+  } finally {
+    creatingChat.value = false;
   }
 }
 
@@ -815,8 +857,8 @@ watch(selectedId, () => {
                 <ChatListHeader title="Диалоги" :beta-enabled="false">
                   <template #actions>
                     <div class="header-actions">
-                      <button class="header-action" type="button" @click="showDm = true">DM</button>
-                      <button class="header-action secondary" type="button" @click="showGroup = true">
+                      <button class="header-action" type="button" @click="openDmModal">DM</button>
+                      <button class="header-action secondary" type="button" @click="openGroupModal">
                         Группа
                       </button>
                     </div>
@@ -917,25 +959,55 @@ watch(selectedId, () => {
       </BaseContainer>
     </div>
 
-    <div v-if="showDm" class="modal-backdrop" @click.self="showDm = false">
-      <div class="modal">
+    <div v-if="showDm" class="modal-backdrop" @click.self="closeDmModal">
+      <div class="modal modal-wide" data-testid="dm-modal">
         <h3>Прямое сообщение</h3>
-        <input v-model="peerLogin" placeholder="логин собеседника" />
+        <p class="modal-hint">Выберите пользователя из списка</p>
+        <UserPicker
+          v-model="dmSelected"
+          mode="single"
+          :exclude-logins="user ? [user.login] : []"
+        />
         <div class="actions">
-          <button class="ghost" type="button" @click="showDm = false">Отмена</button>
-          <button type="button" @click="createDm">Открыть</button>
+          <button class="ghost" type="button" :disabled="creatingChat" @click="closeDmModal">
+            Отмена
+          </button>
+          <button
+            type="button"
+            :disabled="creatingChat || !dmSelected.length"
+            @click="createDm"
+          >
+            Открыть
+          </button>
         </div>
       </div>
     </div>
 
-    <div v-if="showGroup" class="modal-backdrop" @click.self="showGroup = false">
-      <div class="modal">
+    <div v-if="showGroup" class="modal-backdrop" @click.self="closeGroupModal">
+      <div class="modal modal-wide" data-testid="group-modal">
         <h3>Группа</h3>
-        <input v-model="groupTitle" placeholder="название" />
-        <input v-model="groupMembers" placeholder="логины через запятую" />
+        <input
+          v-model="groupTitle"
+          data-testid="group-title"
+          placeholder="название группы"
+        />
+        <p class="modal-hint">Добавьте участников</p>
+        <UserPicker
+          v-model="groupSelected"
+          mode="multiple"
+          :exclude-logins="user ? [user.login] : []"
+        />
         <div class="actions">
-          <button class="ghost" type="button" @click="showGroup = false">Отмена</button>
-          <button type="button" @click="createGroup">Создать</button>
+          <button class="ghost" type="button" :disabled="creatingChat" @click="closeGroupModal">
+            Отмена
+          </button>
+          <button
+            type="button"
+            :disabled="creatingChat || !groupTitle.trim() || !groupSelected.length"
+            @click="createGroup"
+          >
+            Создать
+          </button>
         </div>
       </div>
     </div>

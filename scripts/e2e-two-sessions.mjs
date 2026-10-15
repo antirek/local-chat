@@ -26,9 +26,10 @@ async function register(page, user) {
 
 async function openDm(page, peerLogin) {
   await page.getByRole('button', { name: 'DM' }).click();
-  await page.waitForSelector('.modal');
-  await page.locator('.modal input').fill(peerLogin);
-  await page.locator('.modal').getByRole('button', { name: 'Открыть' }).click();
+  await page.waitForSelector('[data-testid="dm-modal"]');
+  await page.locator('[data-testid="user-search"]').fill(peerLogin);
+  await page.locator(`[data-testid="user-option"][data-login="${peerLogin}"]`).click();
+  await page.locator('[data-testid="dm-modal"]').getByRole('button', { name: 'Открыть' }).click();
   await page.waitForSelector('[data-testid="feed-scroll"], .lc-feed, .message-feed', { timeout: 20000 });
 }
 

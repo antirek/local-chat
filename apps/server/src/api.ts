@@ -113,8 +113,12 @@ export function createApiRouter(chat3: Chat3Client): Router {
     res.json({ user: req.user });
   });
 
-  router.get('/users', authMiddleware, async (_req, res) => {
-    const users = await LocalUser.find().select('login name').lean();
+  router.get('/users', authMiddleware, async (req: AuthedRequest, res) => {
+    // Directory for pickers: everyone except the current user.
+    const users = await LocalUser.find({ login: { $ne: req.user!.login } })
+      .select('login name')
+      .sort({ name: 1, login: 1 })
+      .lean();
     res.json({ users });
   });
 

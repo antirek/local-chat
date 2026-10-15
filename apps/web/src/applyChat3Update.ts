@@ -332,6 +332,31 @@ export function applyChat3Update(update: any, ctx: ApplyCtx): ApplyResult {
     return result;
   }
 
+  // --- Peer catch-up (MarkDialogAllRead finished) → ticks on open dialog ---
+  // Update goes to other members only; reader gets DialogMemberUpdate via counter.
+  const peerCatchUp = data?.peerCatchUp;
+  if (
+    peerCatchUp?.userId &&
+    (source === 'dialog.messages.bulk_read' || uiTarget === 'messages.list')
+  ) {
+    const readerId = String(peerCatchUp.userId);
+    const catchDialogId = String(peerCatchUp.dialogId || dialogId || '');
+    const result: ApplyResult = {};
+    if (catchDialogId && catchDialogId === ctx.selectedId && readerId && readerId !== ctx.myLogin) {
+      let changed = false;
+      const nextMessages = ctx.messages.map((m) => {
+        if (m.senderId !== ctx.myLogin || !m.messageId) return m;
+        const prev = (m.statuses || []).find((s) => s.userId === readerId)?.status;
+        if (prev === 'read') return m;
+        changed = true;
+        return { ...m, statuses: upsertStatus(m.statuses, readerId, 'read') };
+      });
+      if (changed) result.messages = nextMessages;
+    }
+    // May also carry member unread for someone else — ignore.
+    return result;
+  }
+
   // --- Dialog member / unread (dialogs.list) ---
   if (
     source === 'dialog.member.changed' ||
