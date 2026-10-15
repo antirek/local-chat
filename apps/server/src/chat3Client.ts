@@ -61,12 +61,13 @@ export class Chat3Client {
     return this.unary('GetUser', { user_id: userId });
   }
 
-  getUserDialogs(userId: string) {
+  getUserDialogs(userId: string, opts: { page?: number; limit?: number } = {}) {
+    const page = opts.page && opts.page > 0 ? opts.page : 1;
+    const limit = opts.limit && opts.limit > 0 ? opts.limit : 30;
     return this.unary('GetUserDialogs', {
       user_id: userId,
-      page: 1,
-      // Test fixture can be 100+ DMs + groups; keep headroom for seed data.
-      limit: 500,
+      page,
+      limit,
       include_last_message: true,
       // By last message only — not lastInteractionAt (which includes lastSeenAt and
       // pushes a chat to the top on open / MarkDialogAllRead).

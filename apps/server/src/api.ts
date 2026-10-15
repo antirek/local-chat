@@ -120,9 +120,23 @@ export function createApiRouter(chat3: Chat3Client): Router {
 
   router.get('/dialogs', authMiddleware, async (req: AuthedRequest, res) => {
     try {
-      const result = await chat3.getUserDialogs(req.user!.login);
+      const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+      const limit = Math.min(
+        100,
+        Math.max(1, parseInt(String(req.query.limit || '30'), 10) || 30)
+      );
+      const result = await chat3.getUserDialogs(req.user!.login, { page, limit });
       const dialogs = (result.dialogs || []).map(mapDialog);
-      res.json({ dialogs });
+      const p = result.pagination || {};
+      res.json({
+        dialogs,
+        pagination: {
+          page: p.page || page,
+          limit: p.limit || limit,
+          total: p.total ?? dialogs.length,
+          pages: p.pages ?? 1
+        }
+      });
     } catch (error: any) {
       console.error('dialogs', error);
       res.status(500).json({ error: error?.details || error?.message || 'failed' });

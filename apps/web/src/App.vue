@@ -45,7 +45,16 @@ const groupTitle = ref('');
 const groupMembers = ref('');
 const scrollFeedToBottom = ref(false);
 
+/** Dialog list pagination via GetUserDialogs (gRPC page/limit). */
+const DIALOGS_PAGE_SIZE = 30;
+/** Prefetch next page when this many px remain to the bottom (Chotto default is ~300). */
+const DIALOGS_PREFETCH_PX = 1200;
+const dialogsPage = ref(0);
+const dialogsHasMore = ref(true);
+const dialogsLoading = ref(false);
+
 let ws: WebSocket | null = null;
+let chatListEl: HTMLElement | null = null;
 
 const myLogin = computed(() => user.value?.login);
 const readReceipts = useViewportReadReceipts({
@@ -182,13 +191,103 @@ function logout() {
   dialogs.value = [];
   messages.value = [];
   selectedId.value = null;
+  dialogsPage.value = 0;
+  dialogsHasMore.value = true;
+  if (chatListEl) {
+    chatListEl.removeEventListener('scroll', onChatListScroll);
+    chatListEl = null;
+  }
   ws?.close();
   ws = null;
 }
 
+/** Reset and load first page (boot / create DM|group). */
+async function reloadDialogs() {
+  dialogsPage.value = 0;
+  dialogsHasMore.value = true;
+  await loadDialogsPage(true);
+}
+
+/**
+ * Soft refresh: refetch page 1 and merge — keeps already loaded deeper pages,
+ * updates unread/lastMessage for visible head of the list.
+ */
 async function refreshDialogs() {
-  const data = await api.dialogs();
-  dialogs.value = data.dialogs || [];
+  try {
+    const data = await api.dialogs({ page: 1, limit: DIALOGS_PAGE_SIZE });
+    const fresh = data.dialogs || [];
+    const firstIds = new Set(fresh.map((d: any) => d.dialogId));
+    const rest = dialogs.value.filter((d) => !firstIds.has(d.dialogId));
+    dialogs.value = [...fresh, ...rest];
+    if (!dialogsPage.value) {
+      dialogsPage.value = 1;
+      const pages = data.pagination?.pages ?? 1;
+      dialogsHasMore.value = 1 < pages;
+    }
+  } catch (e) {
+    console.warn('refreshDialogs failed', e);
+  }
+}
+
+function chatListScrollBottom(): number {
+  const el = chatListEl || document.querySelector<HTMLElement>('.chat-list__items');
+  if (!el) return Number.POSITIVE_INFINITY;
+  return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+
+function shouldPrefetchDialogs(): boolean {
+  return dialogsHasMore.value && !dialogsLoading.value && chatListScrollBottom() < DIALOGS_PREFETCH_PX;
+}
+
+async function loadDialogsPage(reset: boolean) {
+  if (dialogsLoading.value) return;
+  if (!reset && !dialogsHasMore.value) return;
+  dialogsLoading.value = true;
+  try {
+    const page = reset ? 1 : dialogsPage.value + 1;
+    const data = await api.dialogs({ page, limit: DIALOGS_PAGE_SIZE });
+    const batch = data.dialogs || [];
+    const pag = data.pagination || {};
+    if (reset) {
+      dialogs.value = batch;
+    } else {
+      const seen = new Set(dialogs.value.map((d) => d.dialogId));
+      dialogs.value = [
+        ...dialogs.value,
+        ...batch.filter((d: any) => d.dialogId && !seen.has(d.dialogId))
+      ];
+    }
+    dialogsPage.value = pag.page || page;
+    const pages = pag.pages ?? 1;
+    dialogsHasMore.value =
+      dialogsPage.value < pages && batch.length > 0;
+  } catch (e) {
+    console.warn('loadDialogsPage failed', e);
+  } finally {
+    dialogsLoading.value = false;
+  }
+  // Keep prefetching while the viewport is still near the end (smooth infinite scroll).
+  if (!reset && shouldPrefetchDialogs()) {
+    await loadDialogsPage(false);
+  }
+}
+
+async function onLoadMoreChats() {
+  // Chotto fires near the very bottom (~300px); our scroll listener prefetches earlier.
+  if (!dialogsHasMore.value || dialogsLoading.value) return;
+  await loadDialogsPage(false);
+}
+
+function onChatListScroll() {
+  if (shouldPrefetchDialogs()) void loadDialogsPage(false);
+}
+
+function bindChatListPrefetch() {
+  const el = document.querySelector<HTMLElement>('.chat-list__items');
+  if (!el || el === chatListEl) return;
+  if (chatListEl) chatListEl.removeEventListener('scroll', onChatListScroll);
+  chatListEl = el;
+  chatListEl.addEventListener('scroll', onChatListScroll, { passive: true });
 }
 
 async function openDialog(dialogId: string) {
@@ -252,8 +351,8 @@ async function createDm() {
     const data = await api.dm(peerLogin.value.trim().toLowerCase());
     showDm.value = false;
     peerLogin.value = '';
-    await refreshDialogs();
-    await openDialog(data.dialog.dialogId);
+  await reloadDialogs();
+  await openDialog(data.dialog.dialogId);
   } catch (e: any) {
     error.value = e.message;
   }
@@ -270,7 +369,7 @@ async function createGroup() {
     showGroup.value = false;
     groupTitle.value = '';
     groupMembers.value = '';
-    await refreshDialogs();
+    await reloadDialogs();
     await openDialog(data.dialog.dialogId);
   } catch (e: any) {
     error.value = e.message;
@@ -278,7 +377,8 @@ async function createGroup() {
 }
 
 async function bootChat() {
-  await refreshDialogs();
+  await reloadDialogs();
+  requestAnimationFrame(() => bindChatListPrefetch());
   ws?.close();
   ws = connectUpdates(async (payload) => {
     if (payload.type !== 'chat3.update') return;
@@ -308,6 +408,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', onVisibilityChange);
+  if (chatListEl) {
+    chatListEl.removeEventListener('scroll', onChatListScroll);
+    chatListEl = null;
+  }
   ws?.close();
 });
 
@@ -412,7 +516,12 @@ watch(selectedId, () => {
       <BaseContainer height="100%" width="100%">
         <BaseLayout style="height: 100%; min-height: 0;">
           <template #first-col>
-            <ChatList filter-enabled :chats="chatListItems" @select="onSelectChat">
+            <ChatList
+              filter-enabled
+              :chats="chatListItems"
+              @select="onSelectChat"
+              @load-more-chats="onLoadMoreChats"
+            >
               <template #header>
                 <ChatListHeader title="Диалоги" :beta-enabled="false">
                   <template #actions>

@@ -62,7 +62,12 @@ export const api = {
     request('/api/auth/register', { method: 'POST', body: JSON.stringify(body) }),
   login: (body: { login: string; password: string }) =>
     request('/api/auth/login', { method: 'POST', body: JSON.stringify(body) }),
-  dialogs: () => request('/api/dialogs'),
+  dialogs: (opts: { page?: number; limit?: number } = {}) => {
+    const page = opts.page && opts.page > 0 ? opts.page : 1;
+    const limit = opts.limit && opts.limit > 0 ? opts.limit : 30;
+    const q = new URLSearchParams({ page: String(page), limit: String(limit) });
+    return request(`/api/dialogs?${q}`);
+  },
   users: () => request('/api/users'),
   dm: (peerLogin: string) =>
     request('/api/dm', { method: 'POST', body: JSON.stringify({ peerLogin }) }),
