@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { api } from './api';
 import { initialsAvatar } from './avatars';
 
 export type DirectoryUser = { login: string; name: string };
+
+const PAGE_SIZE = 30;
+const SEARCH_DEBOUNCE_MS = 250;
+const SCROLL_PREFETCH_PX = 80;
 
 const props = withDefaults(
   defineProps<{
@@ -27,9 +31,18 @@ const emit = defineEmits<{
 }>();
 
 const users = ref<DirectoryUser[]>([]);
+/** Keep names for selected chips even if they left the current result page. */
+const knownByLogin = ref<Record<string, DirectoryUser>>({});
 const loading = ref(false);
+const loadingMore = ref(false);
 const loadError = ref('');
 const query = ref('');
+const page = ref(0);
+const pages = ref(1);
+const listEl = ref<HTMLElement | null>(null);
+
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let fetchSeq = 0;
 
 const excludeSet = computed(
   () => new Set((props.excludeLogins || []).map((x) => String(x).toLowerCase()))
@@ -40,37 +53,98 @@ const selected = computed({
   set: (v: string[]) => emit('update:modelValue', v)
 });
 
-const filtered = computed(() => {
-  const q = query.value.trim().toLowerCase();
-  return users.value.filter((u) => {
-    if (excludeSet.value.has(u.login)) return false;
-    if (!q) return true;
-    return u.login.includes(q) || (u.name || '').toLowerCase().includes(q);
-  });
-});
+const hasMore = computed(() => page.value < pages.value);
 
-const selectedUsers = computed(() => {
-  const byLogin = new Map(users.value.map((u) => [u.login, u]));
-  return selected.value
-    .map((login) => byLogin.get(login) || { login, name: login })
-    .filter(Boolean);
-});
+const selectedUsers = computed(() =>
+  selected.value.map((login) => knownByLogin.value[login] || { login, name: login })
+);
 
-async function loadUsers() {
-  loading.value = true;
-  loadError.value = '';
-  try {
-    const data = await api.users();
-    users.value = (data.users || []).map((u: any) => ({
-      login: String(u.login || '').toLowerCase(),
-      name: String(u.name || u.login || '')
-    }));
-  } catch (e: any) {
-    loadError.value = e?.message || 'Не удалось загрузить пользователей';
-    users.value = [];
-  } finally {
-    loading.value = false;
+function mapUsers(raw: any[]): DirectoryUser[] {
+  return (raw || []).map((u: any) => ({
+    login: String(u.login || '').toLowerCase(),
+    name: String(u.name || u.login || '')
+  }));
+}
+
+function remember(list: DirectoryUser[]) {
+  if (!list.length) return;
+  const next = { ...knownByLogin.value };
+  for (const u of list) next[u.login] = u;
+  knownByLogin.value = next;
+}
+
+async function fillViewportIfNeeded(seq: number) {
+  await nextTick();
+  const el = listEl.value;
+  if (!el || seq !== fetchSeq) return;
+  // Short result set may not create a scrollbar — keep fetching until it does or done.
+  if (hasMore.value && !loading.value && !loadingMore.value && el.scrollHeight <= el.clientHeight + 4) {
+    await loadMore();
   }
+}
+
+async function fetchPage(nextPage: number, opts: { replace: boolean; q: string }) {
+  const seq = ++fetchSeq;
+  if (opts.replace) {
+    loading.value = true;
+    loadError.value = '';
+  } else {
+    loadingMore.value = true;
+  }
+  try {
+    const data = await api.users({ page: nextPage, limit: PAGE_SIZE, q: opts.q || null });
+    if (seq !== fetchSeq) return;
+
+    const mapped = mapUsers(data.users).filter((u) => !excludeSet.value.has(u.login));
+    remember(mapped);
+    users.value = opts.replace ? mapped : [...users.value, ...mapped];
+
+    const p = data.pagination || {};
+    page.value = Number(p.page) || nextPage;
+    pages.value = Math.max(1, Number(p.pages) || 1);
+  } catch (e: any) {
+    if (seq !== fetchSeq) return;
+    loadError.value = e?.message || 'Не удалось загрузить пользователей';
+    if (opts.replace) {
+      users.value = [];
+      page.value = 0;
+      pages.value = 1;
+    }
+  } finally {
+    if (seq === fetchSeq) {
+      loading.value = false;
+      loadingMore.value = false;
+    }
+  }
+  if (seq === fetchSeq) await fillViewportIfNeeded(seq);
+}
+
+function reload(q = query.value.trim()) {
+  page.value = 0;
+  pages.value = 1;
+  users.value = [];
+  return fetchPage(1, { replace: true, q });
+}
+
+function loadMore() {
+  if (loading.value || loadingMore.value || !hasMore.value) return;
+  return fetchPage(page.value + 1, { replace: false, q: query.value.trim() });
+}
+
+function onListScroll() {
+  const el = listEl.value;
+  if (!el || loading.value || loadingMore.value || !hasMore.value) return;
+  if (el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_PREFETCH_PX) {
+    void loadMore();
+  }
+}
+
+function scheduleSearch() {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    void reload(query.value.trim());
+  }, SEARCH_DEBOUNCE_MS);
 }
 
 function isSelected(login: string) {
@@ -93,19 +167,40 @@ function removeChip(login: string) {
   selected.value = selected.value.filter((x) => x !== login);
 }
 
+watch(query, () => scheduleSearch());
+
 watch(
   () => props.excludeLogins,
   () => {
-    // Drop selections that became excluded.
     const next = selected.value.filter((l) => !excludeSet.value.has(l));
     if (next.length !== selected.value.length) selected.value = next;
+    users.value = users.value.filter((u) => !excludeSet.value.has(u.login));
   },
   { deep: true }
 );
 
-onMounted(loadUsers);
+watch(selected, (logins) => {
+  // Ensure chips have labels for selections made before known map was filled.
+  for (const login of logins) {
+    if (!knownByLogin.value[login]) {
+      const fromList = users.value.find((u) => u.login === login);
+      if (fromList) remember([fromList]);
+    }
+  }
+});
 
-defineExpose({ reload: loadUsers, query });
+onMounted(async () => {
+  await reload('');
+  await nextTick();
+  listEl.value?.addEventListener('scroll', onListScroll, { passive: true });
+});
+
+onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer);
+  listEl.value?.removeEventListener('scroll', onListScroll);
+});
+
+defineExpose({ reload, query });
 </script>
 
 <template>
@@ -134,13 +229,20 @@ defineExpose({ reload: loadUsers, query });
       autocomplete="off"
     />
 
-    <p v-if="loading" class="user-picker-hint">Загрузка…</p>
-    <p v-else-if="loadError" class="user-picker-error">{{ loadError }}</p>
-    <p v-else-if="!filtered.length" class="user-picker-hint">Никого не найдено</p>
+    <p v-if="loading && !users.length" class="user-picker-hint">Загрузка…</p>
+    <p v-else-if="loadError && !users.length" class="user-picker-error">{{ loadError }}</p>
+    <p v-else-if="!loading && !users.length" class="user-picker-hint">Никого не найдено</p>
 
-    <ul v-else class="user-list" role="listbox" :aria-multiselectable="mode === 'multiple'">
+    <ul
+      v-show="users.length"
+      ref="listEl"
+      class="user-list"
+      role="listbox"
+      :aria-multiselectable="mode === 'multiple'"
+      data-testid="user-list"
+    >
       <li
-        v-for="u in filtered"
+        v-for="u in users"
         :key="u.login"
         role="option"
         class="user-option"
@@ -157,6 +259,8 @@ defineExpose({ reload: loadUsers, query });
         </div>
         <span class="user-check" aria-hidden="true">{{ isSelected(u.login) ? '✓' : '' }}</span>
       </li>
+      <li v-if="loadingMore" class="user-picker-more">Загрузка…</li>
+      <li v-else-if="hasMore" class="user-picker-more muted">Прокрутите ниже</li>
     </ul>
   </div>
 </template>
@@ -176,13 +280,22 @@ defineExpose({ reload: loadUsers, query });
   border-radius: 10px;
 }
 .user-picker-hint,
-.user-picker-error {
+.user-picker-error,
+.user-picker-more {
   margin: 0;
   font-size: 13px;
   color: #64748b;
 }
 .user-picker-error {
   color: #b91c1c;
+}
+.user-picker-more {
+  list-style: none;
+  padding: 10px;
+  text-align: center;
+}
+.user-picker-more.muted {
+  opacity: 0.7;
 }
 .user-picker-chips {
   display: flex;

@@ -69,7 +69,14 @@ export const api = {
     if (opts.filter) q.set('filter', opts.filter);
     return request(`/api/dialogs?${q}`);
   },
-  users: () => request('/api/users'),
+  users: (opts: { page?: number; limit?: number; q?: string | null } = {}) => {
+    const page = opts.page && opts.page > 0 ? opts.page : 1;
+    const limit = opts.limit && opts.limit > 0 ? opts.limit : 30;
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    const q = typeof opts.q === 'string' ? opts.q.trim() : '';
+    if (q) params.set('q', q);
+    return request(`/api/users?${params}`);
+  },
   dm: (peerLogin: string) =>
     request('/api/dm', { method: 'POST', body: JSON.stringify({ peerLogin }) }),
   group: (title: string, memberLogins: string[]) =>

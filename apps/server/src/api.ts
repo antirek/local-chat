@@ -114,12 +114,36 @@ export function createApiRouter(chat3: Chat3Client): Router {
   });
 
   router.get('/users', authMiddleware, async (req: AuthedRequest, res) => {
-    // Directory for pickers: everyone except the current user.
-    const users = await LocalUser.find({ login: { $ne: req.user!.login } })
-      .select('login name')
-      .sort({ name: 1, login: 1 })
-      .lean();
-    res.json({ users });
+    // Directory for pickers: paginated, optional name/login filter, exclude self.
+    const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+    const limit = Math.min(
+      100,
+      Math.max(1, parseInt(String(req.query.limit || '30'), 10) || 30)
+    );
+    const qRaw = req.query.q ?? req.query.filter;
+    const q = typeof qRaw === 'string' ? qRaw.trim() : '';
+
+    const filter: Record<string, unknown> = { login: { $ne: req.user!.login } };
+    if (q) {
+      const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(escaped, 'i');
+      filter.$or = [{ login: re }, { name: re }];
+    }
+
+    const [total, users] = await Promise.all([
+      LocalUser.countDocuments(filter),
+      LocalUser.find(filter)
+        .select('login name')
+        .sort({ name: 1, login: 1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean()
+    ]);
+    const pages = Math.max(1, Math.ceil(total / limit) || 1);
+    res.json({
+      users,
+      pagination: { page, limit, total, pages }
+    });
   });
 
   router.get('/dialogs', authMiddleware, async (req: AuthedRequest, res) => {
