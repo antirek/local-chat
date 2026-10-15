@@ -88,22 +88,36 @@ export function useViewportReadReceipts(options: {
 
     flushing = true;
     try {
-      if (visibleUntil >= latestAt) {
-        await api.markRead(dialogId);
-        dialogMarkedAllRead = true;
-        for (const m of all) {
-          if (m.senderId !== me) marked.add(m.messageId);
-        }
-      } else if (unreadIncoming.length) {
+      // Always SetMessageStatus(read) for visible incoming — that emits
+      // message.status.changed so the sender's ticks update in realtime.
+      // MarkDialogAllRead alone only clears unread counters (no MessageUpdate).
+      const toMark =
+        unreadIncoming.length > 0
+          ? unreadIncoming
+          : visibleUntil >= latestAt
+            ? all.filter((m) => m.senderId !== me && !marked.has(m.messageId))
+            : [];
+
+      if (toMark.length) {
         await Promise.all(
-          unreadIncoming.map((m) =>
+          toMark.map((m) =>
             api.markMessageStatus(dialogId, m.messageId, 'read').catch((e) => {
               console.warn('markMessageStatus failed', m.messageId, e);
             })
           )
         );
-        for (const m of unreadIncoming) marked.add(m.messageId);
-      } else {
+        for (const m of toMark) marked.add(m.messageId);
+      }
+
+      if (visibleUntil >= latestAt) {
+        if (!dialogMarkedAllRead) {
+          await api.markRead(dialogId);
+          dialogMarkedAllRead = true;
+        }
+        for (const m of all) {
+          if (m.senderId !== me) marked.add(m.messageId);
+        }
+      } else if (!toMark.length) {
         return;
       }
 

@@ -134,21 +134,24 @@ function applyStatusToMessages(
   messages: MessageRow[],
   messageId: string,
   statusUpdate: { userId?: string; status?: string } | null | undefined,
-  matrix?: Array<{ userId?: string; status?: string }> | null
+  matrix?: Array<{ userId?: string; status?: string; count?: number }> | null
 ): MessageRow[] | undefined {
   const idx = messages.findIndex((m) => m.messageId === messageId);
   if (idx < 0) return undefined;
   const msg = messages[idx];
   let statuses = msg.statuses ? [...msg.statuses] : [];
-  if (Array.isArray(matrix) && matrix.length) {
-    statuses = matrix.map((s) => ({
-      userId: s.userId,
-      status: s.status
-    }));
-  } else if (statusUpdate?.userId && statusUpdate.status) {
-    statuses = upsertStatus(statuses, statusUpdate.userId, statusUpdate.status);
+  // Prefer per-user statusUpdate. Chat3 statusMessageMatrix is often aggregated
+  // ({count,userType,status}) without userId — must not wipe peer ticks.
+  if (statusUpdate?.userId && statusUpdate.status) {
+    statuses = upsertStatus(statuses, String(statusUpdate.userId), String(statusUpdate.status));
   } else {
-    return undefined;
+    const perUser = Array.isArray(matrix)
+      ? matrix.filter((s) => s && s.userId && s.status)
+      : [];
+    if (!perUser.length) return undefined;
+    for (const s of perUser) {
+      statuses = upsertStatus(statuses, String(s.userId), String(s.status));
+    }
   }
   const copy = messages.slice();
   copy[idx] = { ...msg, statuses };
@@ -261,7 +264,9 @@ export function applyChat3Update(update: any, ctx: ApplyCtx): ApplyResult {
             senderId,
             content: msg.content || '',
             type: msg.type || 'internal.text',
-            createdAt: msg.createdAt || Date.now(),
+            // message.create payloads often omit createdAt — use now so viewport
+            // read receipts can advance visibleUntil for the new message.
+            createdAt: Number(msg.createdAt) || Date.now(),
             deleted: msg.deleted === true,
             senderName: senderNameFrom(msg),
             statuses: Array.isArray(msg.statuses) ? msg.statuses : []

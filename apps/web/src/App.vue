@@ -544,9 +544,15 @@ async function onSend(payload: any) {
   const text = payload?.text || '';
   if (!String(text).trim()) return;
   const data = await api.send(selectedId.value, String(text));
-  messages.value = [...messages.value, { ...data.message, senderName: user.value?.name }];
+  const msg = data.message;
+  if (msg?.messageId && !messages.value.some((m) => m.messageId === msg.messageId)) {
+    messages.value = [
+      ...messages.value,
+      { ...msg, senderName: user.value?.name, statuses: msg.statuses || [] }
+    ];
+  }
   bumpScroll();
-  await refreshDialogs();
+  // List order / lastMessage come from WatchUpdates — no GET /dialogs here.
 }
 
 async function createDm() {
@@ -594,9 +600,33 @@ function setTypingFromUpdate(next: TypingState | null) {
   }, ms);
 }
 
+/** Incoming message.create → delivered, then read if viewing this dialog at the bottom. */
+function ackIncomingReceiptsFromUpdate(update: any) {
+  const source = String(update?.source_event_type || '');
+  if (source !== 'message.create') return;
+  const msg = update?.data?.message;
+  if (!msg?.messageId || !msg?.dialogId) return;
+  const me = user.value?.login;
+  if (!me || msg.senderId === me) return;
+  const dialogId = String(msg.dialogId);
+  const messageId = String(msg.messageId);
+  const markRead = selectedId.value === dialogId && feedNearBottom();
+  // Chain: parallel delivered+read races and the later write can leave status=delivered.
+  void (async () => {
+    try {
+      await api.markMessageStatus(dialogId, messageId, 'delivered');
+      if (markRead) await api.markMessageStatus(dialogId, messageId, 'read');
+    } catch (e) {
+      console.warn('receipt ack failed', e);
+    }
+  })();
+}
+
 function onChat3Update(payload: any) {
   if (payload.type !== 'chat3.update') return;
   const update = payload.update || {};
+  ackIncomingReceiptsFromUpdate(update);
+
   const result = applyChat3Update(update, {
     myLogin: user.value?.login,
     selectedId: selectedId.value,
@@ -614,7 +644,13 @@ function onChat3Update(payload: any) {
       result.messages[result.messages.length - 1]?.messageId !==
         messages.value[messages.value.length - 1]?.messageId;
     messages.value = result.messages;
-    if (grew && feedNearBottom()) bumpScroll();
+    if (grew && feedNearBottom()) {
+      bumpScroll();
+      // After Chotto re-binds IntersectionObserver (nextTick+rAF), rematch reads.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => readReceipts.onDocumentVisible());
+      });
+    }
   }
   if (typeof result.totalUnreadCount === 'number') {
     totalUnreadCount.value = result.totalUnreadCount;
