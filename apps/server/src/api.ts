@@ -125,7 +125,10 @@ export function createApiRouter(chat3: Chat3Client): Router {
         100,
         Math.max(1, parseInt(String(req.query.limit || '30'), 10) || 30)
       );
-      const result = await chat3.getUserDialogs(req.user!.login, { page, limit });
+      const filterRaw = req.query.filter;
+      const filter =
+        typeof filterRaw === 'string' && filterRaw.trim() ? filterRaw.trim() : null;
+      const result = await chat3.getUserDialogs(req.user!.login, { page, limit, filter });
       const dialogs = (result.dialogs || []).map(mapDialog);
       const p = result.pagination || {};
       res.json({

@@ -216,6 +216,35 @@ html, body, #app {
   color: #0f172a;
 }
 
+.dialog-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 14px 10px;
+}
+
+.dialog-filter-chip {
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.dialog-filter-chip:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.dialog-filter-chip.active {
+  border-color: #0f172a;
+  background: #0f172a;
+  color: #fff;
+}
+
 .empty-chat {
   height: 100%;
   min-height: 280px;

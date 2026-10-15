@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue';
 import {
   BaseContainer,
   BaseLayout,
@@ -52,6 +52,38 @@ const DIALOGS_PREFETCH_PX = 1200;
 const dialogsPage = ref(0);
 const dialogsHasMore = ref(true);
 const dialogsLoading = ref(false);
+
+/** Server-side list filters via Chat3 GetUserDialogs `filter` (operator syntax). */
+type DialogListFilter = 'all' | 'dm' | 'group' | 'unanswered';
+const dialogListFilter = ref<DialogListFilter>('all');
+const DIALOG_FILTER_CHIPS: { id: DialogListFilter; label: string }[] = [
+  { id: 'all', label: 'Все' },
+  { id: 'dm', label: 'DM' },
+  { id: 'group', label: 'Группы' },
+  { id: 'unanswered', label: 'Неотвеченные' }
+];
+
+function currentDialogsFilter(): string | null {
+  const me = user.value?.login;
+  switch (dialogListFilter.value) {
+    case 'dm':
+      return '(meta.type,eq,dm)';
+    case 'group':
+      return '(meta.type,eq,group)';
+    case 'unanswered':
+      // Last message not from me (awaiting reply) — Chat3 lastMessage.senderId filter.
+      return me ? `(lastMessage.senderId,ne,${me})` : null;
+    default:
+      return null;
+  }
+}
+
+async function setDialogListFilter(next: DialogListFilter) {
+  if (dialogListFilter.value === next) return;
+  dialogListFilter.value = next;
+  await reloadDialogs();
+  requestAnimationFrame(() => bindChatListPrefetch());
+}
 
 /** Message feed pagination via GetDialogMessages (newest page first, older on scroll-up). */
 const MESSAGES_PAGE_SIZE = 30;
@@ -202,6 +234,7 @@ function logout() {
   dialogs.value = [];
   messages.value = [];
   selectedId.value = null;
+  dialogListFilter.value = 'all';
   dialogsPage.value = 0;
   dialogsHasMore.value = true;
   messagesPage.value = 0;
@@ -234,20 +267,59 @@ async function reloadDialogs() {
  * updates unread/lastMessage for visible head of the list.
  */
 async function refreshDialogs() {
+  const prevIdx = selectedChatIndex();
   try {
-    const data = await api.dialogs({ page: 1, limit: DIALOGS_PAGE_SIZE });
+    const data = await api.dialogs({
+      page: 1,
+      limit: DIALOGS_PAGE_SIZE,
+      filter: currentDialogsFilter()
+    });
     const fresh = data.dialogs || [];
     const firstIds = new Set(fresh.map((d: any) => d.dialogId));
-    const rest = dialogs.value.filter((d) => !firstIds.has(d.dialogId));
-    dialogs.value = [...fresh, ...rest];
+    // Soft merge only in "all" — filtered views must stay exact to the server page.
+    if (dialogListFilter.value === 'all') {
+      const rest = dialogs.value.filter((d) => !firstIds.has(d.dialogId));
+      dialogs.value = [...fresh, ...rest];
+    } else {
+      dialogs.value = fresh;
+      dialogsPage.value = 1;
+      const pages = data.pagination?.pages ?? 1;
+      dialogsHasMore.value = 1 < pages && fresh.length > 0;
+    }
     if (!dialogsPage.value) {
       dialogsPage.value = 1;
       const pages = data.pagination?.pages ?? 1;
       dialogsHasMore.value = 1 < pages;
     }
+    // Selected chat jumped toward the top (new message / reorder) → keep it in view.
+    const nextIdx = selectedChatIndex();
+    if (prevIdx >= 0 && nextIdx >= 0 && nextIdx < prevIdx) {
+      await nextTick();
+      scrollChatListToSelected();
+    }
   } catch (e) {
     console.warn('refreshDialogs failed', e);
   }
+}
+
+function selectedChatIndex(): number {
+  const id = selectedId.value;
+  if (!id) return -1;
+  return dialogs.value.findIndex((d) => d.dialogId === id);
+}
+
+/** Scroll sidebar so the selected chat row is visible (Chotto uses data-chat-id). */
+function scrollChatListToSelected() {
+  const id = selectedId.value;
+  if (!id) return;
+  const list = chatListEl || document.querySelector<HTMLElement>('.chat-list__items');
+  if (!list) return;
+  const item = list.querySelector<HTMLElement>(`[data-chat-id="${CSS.escape(id)}"]`);
+  if (!item) return;
+  const listRect = list.getBoundingClientRect();
+  const itemRect = item.getBoundingClientRect();
+  if (itemRect.top >= listRect.top && itemRect.bottom <= listRect.bottom) return;
+  item.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
 }
 
 /** Coalesce bursty WS updates (mark-read / counter) into one GET /dialogs. */
@@ -275,7 +347,11 @@ async function loadDialogsPage(reset: boolean) {
   dialogsLoading.value = true;
   try {
     const page = reset ? 1 : dialogsPage.value + 1;
-    const data = await api.dialogs({ page, limit: DIALOGS_PAGE_SIZE });
+    const data = await api.dialogs({
+      page,
+      limit: DIALOGS_PAGE_SIZE,
+      filter: currentDialogsFilter()
+    });
     const batch = data.dialogs || [];
     const pag = data.pagination || {};
     if (reset) {
@@ -708,6 +784,20 @@ watch(selectedId, () => {
                     </div>
                   </template>
                 </ChatListHeader>
+                <div class="dialog-filters" role="tablist" aria-label="Фильтр диалогов">
+                  <button
+                    v-for="chip in DIALOG_FILTER_CHIPS"
+                    :key="chip.id"
+                    type="button"
+                    role="tab"
+                    class="dialog-filter-chip"
+                    :class="{ active: dialogListFilter === chip.id }"
+                    :aria-selected="dialogListFilter === chip.id"
+                    @click="setDialogListFilter(chip.id)"
+                  >
+                    {{ chip.label }}
+                  </button>
+                </div>
               </template>
             </ChatList>
           </template>

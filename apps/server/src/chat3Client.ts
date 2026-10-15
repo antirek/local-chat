@@ -61,10 +61,13 @@ export class Chat3Client {
     return this.unary('GetUser', { user_id: userId });
   }
 
-  getUserDialogs(userId: string, opts: { page?: number; limit?: number } = {}) {
+  getUserDialogs(
+    userId: string,
+    opts: { page?: number; limit?: number; filter?: string | null } = {}
+  ) {
     const page = opts.page && opts.page > 0 ? opts.page : 1;
     const limit = opts.limit && opts.limit > 0 ? opts.limit : 30;
-    return this.unary('GetUserDialogs', {
+    const req: Record<string, unknown> = {
       user_id: userId,
       page,
       limit,
@@ -72,7 +75,10 @@ export class Chat3Client {
       // By last message only — not lastInteractionAt (which includes lastSeenAt and
       // pushes a chat to the top on open / MarkDialogAllRead).
       sort: '(lastMessageAt,desc)'
-    });
+    };
+    // Chat3 operator filter, e.g. (meta.type,eq,dm) or (lastMessage.senderId,ne,me)
+    if (opts.filter) req.filter = opts.filter;
+    return this.unary('GetUserDialogs', req);
   }
 
   getDialogMessages(
