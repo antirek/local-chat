@@ -24,6 +24,7 @@ import {
   type User
 } from './api';
 import { formatClock, initialsAvatar, toUnixSeconds } from './avatars';
+import { useViewportReadReceipts } from './useViewportReadReceipts';
 
 const user = ref<User | null>(getUser());
 const token = ref<string | null>(getToken());
@@ -45,6 +46,18 @@ const groupMembers = ref('');
 const scrollFeedToBottom = ref(false);
 
 let ws: WebSocket | null = null;
+
+const myLogin = computed(() => user.value?.login);
+const readReceipts = useViewportReadReceipts({
+  selectedId,
+  messages,
+  myLogin,
+  onMarked: () => refreshDialogs()
+});
+
+function onVisibilityChange() {
+  readReceipts.onDocumentVisible();
+}
 
 const chatListItems = computed(() => {
   const items = dialogs.value.map((d) => {
@@ -173,15 +186,12 @@ async function openDialog(dialogId: string) {
     return;
   }
   selectedId.value = dialogId;
+  readReceipts.resetForDialog(dialogId);
   const data = await api.messages(dialogId);
   messages.value = data.messages || [];
   bumpScroll();
-  try {
-    await api.markRead(dialogId);
-    await refreshDialogs();
-  } catch (e) {
-    console.warn('markRead failed', e);
-  }
+  // Read markers are sent when Feed reports visible incoming messages
+  // (@message-visible / IntersectionObserver), not eagerly on select.
 }
 
 let typingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -275,6 +285,7 @@ async function bootChat() {
 }
 
 onMounted(async () => {
+  document.addEventListener('visibilitychange', onVisibilityChange);
   if (token.value && user.value) {
     try {
       await bootChat();
@@ -284,7 +295,10 @@ onMounted(async () => {
   }
 });
 
-onUnmounted(() => ws?.close());
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', onVisibilityChange);
+  ws?.close();
+});
 
 const groupPanel = ref(false);
 const groupMemberList = ref<{ login: string; name: string }[]>([]);
@@ -457,6 +471,7 @@ watch(selectedId, () => {
                     :current-user-id="user.login"
                     :scroll-to-bottom="scrollFeedToBottom"
                     :reactions-enabled="false"
+                    @message-visible="readReceipts.onMessageVisible"
                   />
                 </div>
                 <ChatInput v-if="selectedChat" @send="onSend" @typing="onTyping">

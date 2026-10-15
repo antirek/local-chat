@@ -182,6 +182,15 @@ export class Chat3Client {
     });
   }
 
+  setMessageStatus(userId: string, dialogId: string, messageId: string, status: string) {
+    return this.unary('SetMessageStatus', {
+      user_id: userId,
+      dialog_id: dialogId,
+      message_id: messageId,
+      status
+    });
+  }
+
   sendTyping(userId: string, dialogId: string) {
     return this.unary('SendTypingIndicator', {
       user_id: userId,

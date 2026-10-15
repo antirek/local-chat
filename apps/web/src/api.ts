@@ -1,25 +1,49 @@
 const TOKEN_KEY = 'local_chat_token';
 const USER_KEY = 'local_chat_user';
 
+/**
+ * Per-tab session (sessionStorage), so two tabs can log in as different users.
+ * Cleared when the tab is closed; not shared across tabs like localStorage.
+ */
+const store: Storage =
+  typeof sessionStorage !== 'undefined' ? sessionStorage : (globalThis as any).localStorage;
+
 export type User = { login: string; name: string };
 
+/** Drop legacy shared localStorage session once (avoids sticky cross-tab login). */
+function migrateAwayFromLocalStorage() {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    if (localStorage.getItem(TOKEN_KEY) || localStorage.getItem(USER_KEY)) {
+      localStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(USER_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  migrateAwayFromLocalStorage();
+  return store.getItem(TOKEN_KEY);
 }
 
 export function getUser(): User | null {
-  const raw = localStorage.getItem(USER_KEY);
+  migrateAwayFromLocalStorage();
+  const raw = store.getItem(USER_KEY);
   return raw ? JSON.parse(raw) : null;
 }
 
 export function setSession(token: string, user: User) {
-  localStorage.setItem(TOKEN_KEY, token);
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  migrateAwayFromLocalStorage();
+  store.setItem(TOKEN_KEY, token);
+  store.setItem(USER_KEY, JSON.stringify(user));
 }
 
 export function clearSession() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
+  store.removeItem(TOKEN_KEY);
+  store.removeItem(USER_KEY);
+  migrateAwayFromLocalStorage();
 }
 
 async function request(path: string, options: RequestInit = {}) {
@@ -55,6 +79,12 @@ export const api = {
     }),
   markRead: (dialogId: string) =>
     request(`/api/dialogs/${dialogId}/read`, { method: 'POST', body: '{}' }),
+  /** Viewport / per-message receipt → Chat3 SetMessageStatus */
+  markMessageStatus: (dialogId: string, messageId: string, status: 'read' | 'delivered' = 'read') =>
+    request(`/api/dialogs/${dialogId}/messages/${encodeURIComponent(messageId)}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status })
+    }),
   typing: (dialogId: string) =>
     request(`/api/dialogs/${dialogId}/typing`, { method: 'POST', body: '{}' }),
   dialog: (dialogId: string) => request(`/api/dialogs/${dialogId}`),

@@ -228,6 +228,31 @@ export function createApiRouter(chat3: Chat3Client): Router {
     }
   });
 
+  /** Per-message read/delivered marker (viewport receipts → SetMessageStatus). */
+  router.post(
+    '/dialogs/:dialogId/messages/:messageId/status',
+    authMiddleware,
+    async (req: AuthedRequest, res) => {
+      try {
+        const status = String(req.body?.status || 'read').toLowerCase();
+        if (!['read', 'delivered', 'unread'].includes(status)) {
+          res.status(400).json({ error: 'status must be read|delivered|unread' });
+          return;
+        }
+        await chat3.setMessageStatus(
+          req.user!.login,
+          req.params.dialogId,
+          req.params.messageId,
+          status
+        );
+        res.json({ ok: true, status });
+      } catch (error: any) {
+        console.error('message-status', error);
+        res.status(500).json({ error: error?.details || error?.message || 'failed' });
+      }
+    }
+  );
+
   router.post('/dialogs/:dialogId/typing', authMiddleware, async (req: AuthedRequest, res) => {
     try {
       const result = await chat3.sendTyping(req.user!.login, req.params.dialogId);
