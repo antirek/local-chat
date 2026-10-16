@@ -244,8 +244,24 @@ export function createApiRouter(chat3: Chat3Client): Router {
         page,
         limit
       });
-      const messages = (result.messages || []).map((m: any) => {
+      const rawMessages = result.messages || [];
+      const senderIds = [
+        ...new Set(
+          rawMessages
+            .map((m: any) => String(m.sender_id || '').toLowerCase())
+            .filter(Boolean)
+        )
+      ];
+      const localByLogin = new Map<string, string>();
+      if (senderIds.length) {
+        const locals = await LocalUser.find({ login: { $in: senderIds } })
+          .select('login name')
+          .lean();
+        for (const u of locals) localByLogin.set(u.login, u.name);
+      }
+      const messages = rawMessages.map((m: any) => {
         const senderMeta = fromStruct(m.sender_info?.meta);
+        const senderId = String(m.sender_id || '').toLowerCase();
         const statuses = (m.statuses || []).map((s: any) => ({
           userId: s.user_id,
           status: s.status,
@@ -260,7 +276,11 @@ export function createApiRouter(chat3: Chat3Client): Router {
           type: m.type,
           createdAt: m.created_at,
           deleted: m.deleted === true,
-          senderName: (senderMeta.name as string) || m.sender_info?.name || m.sender_id,
+          senderName:
+            localByLogin.get(senderId) ||
+            (senderMeta.name as string) ||
+            m.sender_info?.name ||
+            m.sender_id,
           statuses
         };
       });

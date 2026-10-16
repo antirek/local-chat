@@ -49,6 +49,10 @@ const groupTitle = ref('');
 const groupSelected = ref<string[]>([]);
 const creatingChat = ref(false);
 const scrollFeedToBottom = ref(false);
+const groupPanel = ref(false);
+const groupMemberList = ref<{ login: string; name: string }[]>([]);
+const renameTitle = ref('');
+const addMemberLogin = ref('');
 /** Global unread from UserStatsUpdate (toolbar badge). */
 const totalUnreadCount = ref(0);
 /** Peer typing in the open dialog (from TypingUpdate). */
@@ -168,14 +172,48 @@ const selectedChat = computed(
 );
 provide('selectedChat', selectedChat);
 
+const selectedDialog = computed(() =>
+  dialogs.value.find((d) => d.dialogId === selectedId.value) || null
+);
+/** Explicit flag — do not rely only on dialogs[] find (filter pages / race on open). */
+const selectedIsGroup = ref(false);
+const isGroupChat = computed(() => {
+  if (selectedIsGroup.value) return true;
+  const d = selectedDialog.value;
+  if (!d) return false;
+  if (d.meta?.type === 'group') return true;
+  return Number(d.membersCount || 0) > 2;
+});
+
+/** Prefer directory/member display name over raw login when rendering group authors. */
+function resolveSenderLabel(m: { senderId?: string; senderName?: string }): string {
+  const login = String(m.senderId || '').toLowerCase();
+  const fromMembers = groupMemberList.value.find((u) => u.login === login)?.name;
+  const raw = fromMembers || m.senderName || m.senderId || '';
+  return String(raw);
+}
+
 const feedObjects = computed(() => {
+  const showAuthor = isGroupChat.value;
+  // Touch members so name resolution refreshes when the panel prefetch completes.
+  void groupMemberList.value.length;
   const mapped = messages.value
     .filter((m) => !m.deleted)
     .map((m) => {
       // Seconds + fraction (Chat3 µs) — Chotto formatTimestamp expects seconds.
       const timestamp = toUnixSeconds(m.createdAt);
       const incoming = m.senderId !== user.value?.login;
-      const senderLabel = m.senderName || m.senderId;
+      const senderLabel = resolveSenderLabel(m);
+      // Groups: show peer name + avatar (Chotto renders author via subText; header
+      // is used for consecutive-sender grouping). DMs stay clean without author chrome.
+      const author =
+        showAuthor && incoming
+          ? {
+              header: senderLabel,
+              subText: senderLabel,
+              avatar: initialsAvatar(String(m.senderId || senderLabel), senderLabel)
+            }
+          : {};
       return {
         type: 'message.text',
         messageId: m.messageId,
@@ -185,11 +223,7 @@ const feedObjects = computed(() => {
         // Incoming: no delivery ticks for the viewer.
         status: incoming ? undefined : chottoOutgoingStatus(m, user.value?.login),
         direction: incoming ? 'incoming' : 'outgoing',
-        // header/avatar only for incoming — closer to Slack / BasicChat polish
-        header: incoming ? senderLabel : undefined,
-        avatar: incoming
-          ? initialsAvatar(String(m.senderId || senderLabel), senderLabel)
-          : undefined
+        ...author
       };
     });
   const sorted = sortByTimestamp(mapped as any);
@@ -503,7 +537,13 @@ async function openDialog(dialogId: string) {
   messagesPage.value = 0;
   messagesHasMore.value = true;
   messages.value = [];
+  groupMemberList.value = [];
+  const opened = dialogs.value.find((d) => d.dialogId === dialogId);
+  selectedIsGroup.value =
+    opened?.meta?.type === 'group' || Number(opened?.membersCount || 0) > 2;
   await loadMessagesPage(true);
+  // Prefetch members so group feed can show display names, not only logins.
+  if (selectedIsGroup.value) void loadGroupPanel();
   bumpScroll();
   requestAnimationFrame(() => {
     bindFeedPrefetch();
@@ -745,11 +785,6 @@ onUnmounted(() => {
   }
   ws?.close();
 });
-
-const groupPanel = ref(false);
-const groupMemberList = ref<{ login: string; name: string }[]>([]);
-const renameTitle = ref('');
-const addMemberLogin = ref('');
 
 async function loadGroupPanel() {
   if (!selectedId.value) return;
@@ -1067,5 +1102,14 @@ watch(selectedId, () => {
   --chotto-textmessage-right-content-grid-column: 1;
   --chotto-textmessage-left-box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
   --chotto-textmessage-right-box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --chotto-textmessage-subtext-font-size: 13px;
+  --chotto-textmessage-subtext-color: #0f766e;
+}
+.lc-feed :deep(.text-message__subtext) {
+  font-weight: 600;
+}
+.lc-feed :deep(.text-message__avatar) {
+  border-radius: 50%;
+  object-fit: cover;
 }
 </style>
