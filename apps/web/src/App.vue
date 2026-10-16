@@ -81,8 +81,8 @@ function currentDialogsFilter(): string | null {
     case 'group':
       return '(meta.type,eq,group)';
     case 'unanswered':
-      // Last message not from me (awaiting reply) — Chat3 lastMessage.senderId filter.
-      return me ? `(lastMessage.senderId,ne,${me})` : null;
+      // Peer sent last message AND there are unread — badge always meaningful.
+      return me ? `(lastMessage.senderId,ne,${me})&(unreadCount,gt,0)` : null;
     default:
       return null;
   }
@@ -119,10 +119,14 @@ const readReceipts = useViewportReadReceipts({
     // Optimistic only — full list refresh is debounced via WS DialogMemberUpdate.
     // Awaiting refreshDialogs here doubled GET /dialogs on every mark-read.
     const id = selectedId.value;
-    if (id) {
-      const row = dialogs.value.find((d) => d.dialogId === id);
-      if (row) row.unreadCount = 0;
+    if (!id) return;
+    if (dialogListFilter.value === 'unanswered') {
+      // Unanswered = unread>0; once read, drop from this view immediately.
+      dialogs.value = dialogs.value.filter((d) => d.dialogId !== id);
+      return;
     }
+    const row = dialogs.value.find((d) => d.dialogId === id);
+    if (row) row.unreadCount = 0;
   }
 });
 
@@ -149,7 +153,7 @@ const chatListItems = computed(() => {
       chatId: d.dialogId,
       name: title,
       avatar: initialsAvatar(String(d.dialogId || title), title),
-      countUnread: d.unreadCount || 0,
+      countUnread: Number(d.unreadCount) || 0,
       lastMessage: d.lastMessage?.content || '',
       'lastActivity.timestamp': activity,
       'lastActivity.time': clockSec ? formatClock(clockSec) : '',

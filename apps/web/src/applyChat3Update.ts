@@ -107,11 +107,28 @@ function bumpDialogToTop(
   return { dialogs: [next, ...rest], movedUp: true };
 }
 
+function pickUnreadCount(...sources: Array<Record<string, unknown> | null | undefined>): number | undefined {
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    const raw = (src as any).unreadCount ?? (src as any).unread_count;
+    if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+    if (typeof raw === 'string' && raw.trim() !== '' && Number.isFinite(Number(raw))) {
+      return Number(raw);
+    }
+  }
+  return undefined;
+}
+
 function patchUnread(
   dialogs: DialogRow[],
   dialogId: string,
-  unreadCount: number
+  unreadCount: number,
+  dialogListFilter = 'all'
 ): DialogRow[] {
+  // Unanswered view is unread>0 — drop rows that no longer qualify.
+  if (dialogListFilter === 'unanswered' && unreadCount <= 0) {
+    return dialogs.filter((d) => d.dialogId !== dialogId);
+  }
   const idx = dialogs.findIndex((d) => d.dialogId === dialogId);
   if (idx < 0) return dialogs;
   if (dialogs[idx].unreadCount === unreadCount) return dialogs;
@@ -234,10 +251,9 @@ export function applyChat3Update(update: any, ctx: ApplyCtx): ApplyResult {
       );
       if (patched) result.messages = patched;
     }
-    const unread =
-      data?.member?.state?.unreadCount ?? data?.dialog?.stats?.unreadCount;
+    const unread = pickUnreadCount(data?.member?.state, data?.dialog?.stats);
     if (dialogId && typeof unread === 'number') {
-      result.dialogs = patchUnread(ctx.dialogs, dialogId, unread);
+      result.dialogs = patchUnread(ctx.dialogs, dialogId, unread, ctx.dialogListFilter);
     }
     return result;
   }
@@ -288,8 +304,7 @@ export function applyChat3Update(update: any, ctx: ApplyCtx): ApplyResult {
 
     // Dialog list: last message preview + unread + bump to top (all filter only).
     if (msgDialogId) {
-      const unreadRaw =
-        data?.member?.state?.unreadCount ?? data?.dialog?.stats?.unreadCount;
+      const unreadRaw = pickUnreadCount(data?.member?.state, data?.dialog?.stats);
       const unread =
         typeof unreadRaw === 'number'
           ? unreadRaw
@@ -318,13 +333,30 @@ export function applyChat3Update(update: any, ctx: ApplyCtx): ApplyResult {
         if (bumped.dialogs === ctx.dialogs && !ctx.dialogs.some((d) => d.dialogId === msgDialogId)) {
           result.needsDialogRefresh = true;
         }
+      } else if (ctx.dialogListFilter === 'unanswered') {
+        // You replied → leave unanswered; peer message with unread → keep/patch or refresh.
+        if (senderId === ctx.myLogin || unread <= 0) {
+          result.dialogs = ctx.dialogs.filter((d) => d.dialogId !== msgDialogId);
+        } else if (ctx.dialogs.some((d) => d.dialogId === msgDialogId)) {
+          result.dialogs = patchUnread(
+            ctx.dialogs.map((d) =>
+              d.dialogId === msgDialogId ? { ...d, ...patch } : d
+            ),
+            msgDialogId,
+            unread,
+            ctx.dialogListFilter
+          );
+        } else {
+          result.needsDialogRefresh = true;
+        }
       } else {
         result.dialogs = patchUnread(
           ctx.dialogs.map((d) =>
             d.dialogId === msgDialogId ? { ...d, ...patch } : d
           ),
           msgDialogId,
-          unread
+          unread,
+          ctx.dialogListFilter
         );
       }
     }
@@ -364,9 +396,11 @@ export function applyChat3Update(update: any, ctx: ApplyCtx): ApplyResult {
     data?.member?.state ||
     (uiTarget === 'dialogs.list' && dialogId)
   ) {
-    const unread = data?.member?.state?.unreadCount ?? data?.dialog?.stats?.unreadCount;
+    const unread = pickUnreadCount(data?.member?.state, data?.dialog?.stats);
     if (dialogId && typeof unread === 'number') {
-      return { dialogs: patchUnread(ctx.dialogs, dialogId, unread) };
+      return {
+        dialogs: patchUnread(ctx.dialogs, dialogId, unread, ctx.dialogListFilter)
+      };
     }
     // Member update without usable unread — soft refresh.
     if (source === 'dialog.member.changed' || source.startsWith('dialog.')) {
